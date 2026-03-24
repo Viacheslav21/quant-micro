@@ -93,10 +93,10 @@ class Database:
                 VALUES (1, 500)
                 ON CONFLICT (id) DO NOTHING;
             """)
-        # Migrations
-        await conn.execute("""
-            ALTER TABLE micro_watchlist DROP COLUMN IF EXISTS end_date;
-        """)
+            # Migrations
+            await conn.execute("""
+                ALTER TABLE micro_watchlist DROP COLUMN IF EXISTS end_date;
+            """)
         log.info("[DB] Schema ready")
 
     # ── Watchlist ──
