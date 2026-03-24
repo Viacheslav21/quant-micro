@@ -36,7 +36,6 @@ class Database:
                     yes_token    TEXT,
                     no_token     TEXT,
                     neg_risk     BOOLEAN DEFAULT FALSE,
-                    end_date     TIMESTAMPTZ,
                     added_at     TIMESTAMPTZ DEFAULT NOW(),
                     updated_at   TIMESTAMPTZ DEFAULT NOW()
                 );
@@ -94,6 +93,10 @@ class Database:
                 VALUES (1, 500)
                 ON CONFLICT (id) DO NOTHING;
             """)
+        # Migrations
+        await conn.execute("""
+            ALTER TABLE micro_watchlist DROP COLUMN IF EXISTS end_date;
+        """)
         log.info("[DB] Schema ready")
 
     # ── Watchlist ──
@@ -104,8 +107,8 @@ class Database:
                 INSERT INTO micro_watchlist
                     (market_id, question, theme, yes_price, no_price,
                      volume, liquidity, spread, best_ask, peak_price,
-                     yes_token, no_token, neg_risk, end_date)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                     yes_token, no_token, neg_risk)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                 ON CONFLICT (market_id) DO UPDATE SET
                     yes_price  = EXCLUDED.yes_price,
                     no_price   = EXCLUDED.no_price,
@@ -122,7 +125,7 @@ class Database:
                 market.get("spread", 0), market.get("best_ask", 0),
                 market.get("yes_price"),  # initial peak = current price
                 market.get("yes_token"), market.get("no_token"),
-                market.get("neg_risk", False), market.get("end_date"),
+                market.get("neg_risk", False),
             )
 
     async def get_watchlist(self) -> list:
