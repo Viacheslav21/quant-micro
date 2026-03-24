@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 import httpx
 
 log = logging.getLogger("micro.scanner")
@@ -130,10 +131,19 @@ class MicroScanner:
                 "yes_token": yes_token,
                 "no_token": no_token,
                 "neg_risk": bool(m.get("negRisk")),
-                "end_date": m.get("endDate"),
+                "end_date": self._parse_date(m.get("endDate")),
             }
 
         except (ValueError, TypeError, IndexError):
+            return None
+
+    @staticmethod
+    def _parse_date(s: str | None):
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
             return None
 
     async def close(self):
