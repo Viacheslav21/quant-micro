@@ -1,0 +1,272 @@
+import os
+import time
+import logging
+from typing import Optional
+import asyncpg
+
+log = logging.getLogger("micro.db")
+
+
+class Database:
+    def __init__(self):
+        self.url = os.getenv("DATABASE_URL")
+        self.pool: Optional[asyncpg.Pool] = None
+
+    async def init(self):
+        self.pool = await asyncpg.create_pool(
+            self.url, min_size=2, max_size=10, command_timeout=30
+        )
+        await self._create_schema()
+        log.info("[DB] PostgreSQL connected")
+
+    async def _create_schema(self):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS micro_watchlist (
+                    market_id    TEXT PRIMARY KEY,
+                    question     TEXT NOT NULL,
+                    theme        TEXT DEFAULT 'other',
+                    yes_price    REAL NOT NULL,
+                    no_price     REAL DEFAULT 0,
+                    volume       REAL DEFAULT 0,
+                    liquidity    REAL DEFAULT 0,
+                    spread       REAL DEFAULT 0,
+                    best_ask     REAL DEFAULT 0,
+                    peak_price   REAL DEFAULT 0,
+                    yes_token    TEXT,
+                    no_token     TEXT,
+                    neg_risk     BOOLEAN DEFAULT FALSE,
+                    end_date     TIMESTAMPTZ,
+                    added_at     TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at   TIMESTAMPTZ DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS micro_positions (
+                    id           TEXT PRIMARY KEY,
+                    market_id    TEXT NOT NULL,
+                    question     TEXT NOT NULL,
+                    theme        TEXT DEFAULT 'other',
+                    side         TEXT NOT NULL,
+                    entry_price  REAL NOT NULL,
+                    current_price REAL,
+                    stake_amt    REAL NOT NULL,
+                    unrealized_pnl REAL DEFAULT 0,
+                    pnl          REAL DEFAULT 0,
+                    tp_pct       REAL DEFAULT 0.05,
+                    sl_pct       REAL DEFAULT 0.10,
+                    status       TEXT DEFAULT 'open',
+                    result       TEXT,
+                    close_reason TEXT,
+                    config_tag   TEXT DEFAULT 'micro-v1',
+                    opened_at    TIMESTAMPTZ DEFAULT NOW(),
+                    closed_at    TIMESTAMPTZ
+                );
+
+                CREATE TABLE IF NOT EXISTS micro_stats (
+                    id           INTEGER PRIMARY KEY DEFAULT 1,
+                    bankroll     REAL NOT NULL DEFAULT 500,
+                    total_pnl    REAL DEFAULT 0,
+                    wins         INTEGER DEFAULT 0,
+                    losses       INTEGER DEFAULT 0,
+                    total_trades INTEGER DEFAULT 0,
+                    peak_equity  REAL DEFAULT 0,
+                    updated_at   TIMESTAMPTZ DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS micro_log (
+                    id           BIGSERIAL PRIMARY KEY,
+                    event_type   TEXT NOT NULL,
+                    market_id    TEXT,
+                    details      JSONB DEFAULT '{}',
+                    created_at   TIMESTAMPTZ DEFAULT NOW()
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_micro_pos_status
+                    ON micro_positions(status);
+                CREATE INDEX IF NOT EXISTS idx_micro_pos_market
+                    ON micro_positions(market_id);
+                CREATE INDEX IF NOT EXISTS idx_micro_log_type
+                    ON micro_log(event_type, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_micro_watchlist_price
+                    ON micro_watchlist(yes_price DESC);
+
+                INSERT INTO micro_stats (id, bankroll)
+                VALUES (1, 500)
+                ON CONFLICT (id) DO NOTHING;
+            """)
+        log.info("[DB] Schema ready")
+
+    # ── Watchlist ──
+
+    async def upsert_watchlist(self, market: dict):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO micro_watchlist
+                    (market_id, question, theme, yes_price, no_price,
+                     volume, liquidity, spread, best_ask, peak_price,
+                     yes_token, no_token, neg_risk, end_date)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                ON CONFLICT (market_id) DO UPDATE SET
+                    yes_price  = EXCLUDED.yes_price,
+                    no_price   = EXCLUDED.no_price,
+                    volume     = EXCLUDED.volume,
+                    liquidity  = EXCLUDED.liquidity,
+                    spread     = EXCLUDED.spread,
+                    best_ask   = EXCLUDED.best_ask,
+                    peak_price = GREATEST(micro_watchlist.peak_price, EXCLUDED.yes_price),
+                    updated_at = NOW()
+            """,
+                market["market_id"], market["question"], market.get("theme", "other"),
+                market["yes_price"], market.get("no_price", 0),
+                market.get("volume", 0), market.get("liquidity", 0),
+                market.get("spread", 0), market.get("best_ask", 0),
+                market.get("yes_price"),  # initial peak = current price
+                market.get("yes_token"), market.get("no_token"),
+                market.get("neg_risk", False), market.get("end_date"),
+            )
+
+    async def get_watchlist(self) -> list:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM micro_watchlist ORDER BY yes_price DESC"
+            )
+            return [dict(r) for r in rows]
+
+    async def remove_from_watchlist(self, market_id: str):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM micro_watchlist WHERE market_id = $1", market_id
+            )
+
+    async def update_watchlist_price(self, market_id: str, price: float):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE micro_watchlist
+                SET yes_price  = $2,
+                    peak_price = GREATEST(peak_price, $2),
+                    updated_at = NOW()
+                WHERE market_id = $1
+            """, market_id, price)
+
+    async def get_watchlist_market(self, market_id: str) -> Optional[dict]:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM micro_watchlist WHERE market_id = $1", market_id
+            )
+            return dict(row) if row else None
+
+    # ── Positions ──
+
+    async def save_position(self, pos: dict):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO micro_positions
+                    (id, market_id, question, theme, side, entry_price,
+                     current_price, stake_amt, tp_pct, sl_pct, config_tag)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+            """,
+                pos["id"], pos["market_id"], pos["question"],
+                pos.get("theme", "other"), pos["side"], pos["entry_price"],
+                pos["entry_price"], pos["stake_amt"],
+                pos.get("tp_pct", 0.05), pos.get("sl_pct", 0.10),
+                pos.get("config_tag", "micro-v1"),
+            )
+
+    async def get_open_positions(self) -> list:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM micro_positions WHERE status = 'open' ORDER BY opened_at DESC"
+            )
+            return [dict(r) for r in rows]
+
+    async def close_position(self, pos_id: str, pnl: float, result: str, reason: str) -> bool:
+        """Atomic close with race protection."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                UPDATE micro_positions
+                SET status = 'closed', pnl = $2, result = $3, close_reason = $4,
+                    closed_at = NOW()
+                WHERE id = $1 AND status = 'open'
+                RETURNING id
+            """, pos_id, pnl, result, reason)
+            if row:
+                sign = 1 if result == "WIN" else -1
+                await conn.execute("""
+                    UPDATE micro_stats SET
+                        bankroll     = bankroll + $1,
+                        total_pnl    = total_pnl + $1,
+                        wins         = wins + CASE WHEN $2 = 'WIN' THEN 1 ELSE 0 END,
+                        losses       = losses + CASE WHEN $2 = 'LOSS' THEN 1 ELSE 0 END,
+                        total_trades = total_trades + 1,
+                        updated_at   = NOW()
+                    WHERE id = 1
+                """, pnl, result)
+                return True
+            return False
+
+    async def update_position_price(self, pos_id: str, price: float, unrealized_pnl: float):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE micro_positions
+                SET current_price = $2, unrealized_pnl = $3
+                WHERE id = $1 AND status = 'open'
+            """, pos_id, price, unrealized_pnl)
+
+    # ── Stats ──
+
+    async def get_stats(self) -> dict:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM micro_stats WHERE id = 1")
+            return dict(row) if row else {"bankroll": 500, "total_pnl": 0, "wins": 0, "losses": 0}
+
+    async def update_peak_equity(self, equity: float):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE micro_stats
+                SET peak_equity = GREATEST(peak_equity, $1), updated_at = NOW()
+                WHERE id = 1
+            """, equity)
+
+    async def set_bankroll(self, bankroll: float):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE micro_stats SET bankroll = $1, updated_at = NOW() WHERE id = 1",
+                bankroll,
+            )
+
+    # ── Logging ──
+
+    async def log_event(self, event_type: str, market_id: str = None, details: dict = None):
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO micro_log (event_type, market_id, details) VALUES ($1, $2, $3)",
+                    event_type, market_id, __import__("json").dumps(details or {}),
+                )
+        except Exception as e:
+            log.warning(f"[DB] log_event failed: {e}")
+
+    # ── Cleanup ──
+
+    async def cleanup_watchlist(self):
+        """Remove markets that left the watchlist zone (price < 0.80 or > 0.97)."""
+        async with self.pool.acquire() as conn:
+            deleted = await conn.execute("""
+                DELETE FROM micro_watchlist
+                WHERE yes_price < 0.80 OR yes_price > 0.97
+                    OR updated_at < NOW() - INTERVAL '1 day'
+            """)
+            log.debug(f"[DB] Watchlist cleanup: {deleted}")
+
+    async def has_position_on_market(self, market_id: str) -> bool:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT 1 FROM micro_positions WHERE market_id = $1 AND status = 'open'",
+                market_id,
+            )
+            return row is not None
+
+    async def close(self):
+        if self.pool:
+            await self.pool.close()
+            log.info("[DB] Pool closed")
