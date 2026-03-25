@@ -219,11 +219,19 @@ class MicroWS:
             return
 
         raw = float(data.get("price", 0))
-        if raw <= 0:
+        if raw <= 0 or raw > 1.0:
             return
 
         info = self.prices[ws_key]
-        info["price"] = self._to_side_price(token_id, raw)
+        new_price = self._to_side_price(token_id, raw)
+
+        # Sanity: reject wild price jumps (>50% from current) — likely bad tick
+        old_price = info.get("price", 0.5)
+        if old_price > 0.1 and abs(new_price - old_price) > old_price * 0.5:
+            log.warning(f"[WS] Wild tick rejected: {ws_key} {old_price:.4f}→{new_price:.4f} (raw={raw:.4f})")
+            return
+
+        info["price"] = new_price
         info["last_update"] = time.time()
         await self._dispatch(ws_key, info)
 
@@ -239,20 +247,43 @@ class MicroWS:
         bids = data.get("bids", [])
         asks = data.get("asks", [])
 
+        # Polymarket book events can be incremental — bids[0] might NOT be the best bid.
+        # Find actual best bid (highest) and best ask (lowest > 0) from all levels.
+        raw_best_bid = 0.0
+        raw_best_ask = 0.0
+        for b in bids:
+            p = float(b.get("price", 0))
+            s = float(b.get("size", 0))
+            if p > 0 and s > 0 and p > raw_best_bid:
+                raw_best_bid = p
+        for a in asks:
+            p = float(a.get("price", 0))
+            s = float(a.get("size", 0))
+            if p > 0 and s > 0 and (raw_best_ask == 0 or p < raw_best_ask):
+                raw_best_ask = p
+
         if not invert:
-            # YES side: YES token bid/ask = our bid/ask directly
-            if bids:
-                info["best_bid"] = float(bids[0].get("price", 0))
-            if asks:
-                info["best_ask"] = float(asks[0].get("price", 0))
+            if raw_best_bid > 0:
+                info["best_bid"] = raw_best_bid
+            if raw_best_ask > 0:
+                info["best_ask"] = raw_best_ask
         else:
             # NO side: subscribed to YES token, invert to get NO prices
             # NO bid = 1 - YES ask (what we'd get selling NO)
             # NO ask = 1 - YES bid (what we'd pay buying NO)
-            if asks:
-                info["best_bid"] = round(1.0 - float(asks[0].get("price", 0)), 4)
-            if bids:
-                info["best_ask"] = round(1.0 - float(bids[0].get("price", 0)), 4)
+            if raw_best_ask > 0:
+                info["best_bid"] = round(1.0 - raw_best_ask, 4)
+            if raw_best_bid > 0:
+                info["best_bid_from_book"] = True  # mark that we got a real book update
+                info["best_ask"] = round(1.0 - raw_best_bid, 4)
+
+        # Sanity check: bid/ask must be in valid range and bid < ask
+        bid = info.get("best_bid", 0)
+        ask = info.get("best_ask", 0)
+        if bid <= 0.001 or bid >= 1.0:
+            info["best_bid"] = info["price"]  # fallback to last price
+        if ask <= 0.001 or ask >= 1.0:
+            info["best_ask"] = info["price"]
 
         info["last_update"] = time.time()
         await self._dispatch(ws_key, info)

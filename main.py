@@ -294,6 +294,15 @@ async def check_position_price(ws_key: str, price: float, info: dict,
     if bid_price <= 0:
         bid_price = price
 
+    # Sanity: for 90%+ entries, bid can't realistically drop >50% without resolution
+    # If bid_price is absurdly low, it's a bad WS tick — use last known good price or entry
+    if bid_price < entry_price * 0.5:
+        log.warning(
+            f"[SANITY] {market_id[:8]} {side} bid={bid_price:.4f} << entry={entry_price:.4f} — "
+            f"ignoring bad tick (price={price:.4f}, best_bid={info.get('best_bid')}, best_ask={info.get('best_ask')})"
+        )
+        return  # skip this tick entirely, don't update DB with garbage
+
     pnl_pct = (bid_price - entry_price) / entry_price
     pnl_dollar = pnl_pct * stake
 
