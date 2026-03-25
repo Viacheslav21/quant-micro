@@ -10,19 +10,29 @@ log = logging.getLogger("micro.scanner")
 GAMMA_API = "https://gamma-api.polymarket.com"
 
 THEME_KEYWORDS = {
-    "crypto":      ["bitcoin", "btc", "ethereum", "eth", "crypto", "solana", "sol", "xrp", "dogecoin"],
-    "politics":    ["trump", "biden", "election", "president", "congress", "senate", "governor"],
+    "crypto":      ["bitcoin", "btc", "ethereum", "eth", "crypto", "solana", "sol", "xrp", "dogecoin",
+                    "defi", "nft", "token", "blockchain", "megaeth", "polymarket"],
+    "politics":    ["trump", "biden", "election", "president", "congress", "senate", "governor",
+                    "democrat", "republican", "gop", "parliament", "prime minister", "party win"],
+    "iran":        ["iran", "tehran", "khamenei", "hormuz", "persian gulf", "enrichment", "nuclear deal"],
+    "israel":      ["israel", "idf", "hamas", "hezbollah", "houthi", "dimona", "gaza", "netanyahu"],
+    "military":    ["military", "strike", "ceasefire", "invasion", "troops", "airstrike", "missile",
+                    "evacuate", "embassy", "nato", "war ", "peace deal"],
     "fed":         ["fed ", "interest rate", "fomc", "federal reserve", "rate cut", "rate hike"],
     "economy":     ["gdp", "inflation", "recession", "unemployment", "cpi", "jobs"],
-    "tech":        ["apple", "google", "meta", "microsoft", "nvidia", "openai", "ai "],
+    "tech":        ["apple", "google", "meta", "microsoft", "nvidia", "openai", "ai ", "deepseek",
+                    "chatgpt", "gemini", "released", "launch"],
     "sports":      ["nba", "nfl", "mlb", "ufc", "premier league", "champions league", "world cup",
-                    "match", "game ", "score", "winner", "playoff"],
+                    "ncaa", "tournament", "match", "game ", "score", "winner", "playoff",
+                    "real madrid", "barcelona", "lakers", "celtics"],
     "esports":     ["esports", "counter-strike", "dota", "league of legends", "valorant",
-                    "semperfi", "fnatic", "navi", "faze", " vs "],
-    "geopolitics": ["russia", "ukraine", "china", "taiwan", "war", "nato", "sanctions"],
-    "spacex":      ["spacex", "starship", "launch", "rocket", "nasa"],
-    "markets":     ["s&p", "spy", "nasdaq", "dow jones", "gold", "oil", "commodities"],
-    "celeb":       ["elon", "musk", "kanye", "celebrity"],
+                    "semperfi", "fnatic", "navi", "faze", " vs ", "mongolz", "blast open"],
+    "geopolitics": ["russia", "ukraine", "china", "taiwan", "sanctions", "pakistan", "afghanistan",
+                    "qatar", "kuwait", "uae", "saudi"],
+    "spacex":      ["spacex", "starship", "rocket", "nasa"],
+    "markets":     ["s&p", "spy", "nasdaq", "dow jones", "gold", "oil", "commodities", "crude"],
+    "celeb":       ["elon", "musk", "kanye", "celebrity", "bitboy"],
+    "social":      ["tweet", "post", "mention", "x.com", "twitter"],
 }
 
 # Themes with ALWAYS-risky gap risk (sports scores, esports matches)
