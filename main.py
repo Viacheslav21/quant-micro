@@ -95,6 +95,9 @@ async def check_dip_entry(market_id: str, price: float, info: dict,
     if dip_pct < CONFIG["DIP_TRIGGER_PCT"]:
         return  # no dip yet
 
+    log.info(f"[DIP] Detected {dip_pct:.1%} dip on {market_id[:8]} "
+             f"peak={peak:.3f} now={price:.3f} q='{info.get('question', '')[:40]}'")
+
     # Price must still be in a reasonable range (not crashing)
     if price < 0.80:
         return
@@ -407,7 +410,7 @@ async def main():
             )
 
             # 4. Cleanup stale watchlist entries
-            if scan_count % 10 == 0:
+            if scan_count % 30 == 0:
                 await db.cleanup_watchlist()
 
                 # Unregister WS markets that are no longer in watchlist and not positions

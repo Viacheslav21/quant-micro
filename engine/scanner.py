@@ -55,7 +55,7 @@ class MicroScanner:
         offset = 0
 
         try:
-            while len(candidates) < 300:
+            while len(candidates) < 300 and offset < 600:
                 r = await self.client.get(f"{GAMMA_API}/markets", params={
                     "active": "true", "closed": "false",
                     "order": "volume24hr", "ascending": "false",

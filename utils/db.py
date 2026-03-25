@@ -252,12 +252,12 @@ class Database:
     # ── Cleanup ──
 
     async def cleanup_watchlist(self):
-        """Remove markets that left the watchlist zone (price < 0.80 or > 0.97)."""
+        """Remove markets that left the watchlist zone or went stale."""
         async with self.pool.acquire() as conn:
             deleted = await conn.execute("""
                 DELETE FROM micro_watchlist
-                WHERE yes_price < 0.80 OR yes_price > 0.97
-                    OR updated_at < NOW() - INTERVAL '1 day'
+                WHERE yes_price < 0.75 OR yes_price > 0.98
+                    OR updated_at < NOW() - INTERVAL '7 days'
             """)
             log.debug(f"[DB] Watchlist cleanup: {deleted}")
 
