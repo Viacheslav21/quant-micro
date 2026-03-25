@@ -314,24 +314,6 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             )
         return
 
-    # ── Resolution LOSS: our side price → ≤3¢ (resolved against us) ──
-    # Use 3¢ threshold — 5¢ could be normal low-liquidity spread
-    if bid_price <= 0.03:
-        pnl = -stake  # lost entire stake
-        closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "resolved_against")
-        if closed:
-            ws.unmark_position(ws_key)
-            log.info(f"[RESOLVED] LOSS {side} '{pos['question'][:40]}' PnL: ${pnl:.2f} (resolved against)")
-            await db.log_event("CLOSE_RESOLVED_LOSS", market_id, {
-                "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
-            })
-            await tg.send(
-                f"⚠️ <b>RESOLVED AGAINST</b> {side}\n{pos['question'][:60]}\n"
-                f"Entry: {entry_price:.2f}¢ → {bid_price:.2f}¢\n"
-                f"PnL: ${pnl:.2f} (full loss)"
-            )
-        return
-
     # ── Stop Loss ──
     if pnl_pct <= -sl_pct:
         pnl = pnl_pct * stake

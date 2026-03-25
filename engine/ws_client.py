@@ -19,9 +19,8 @@ class MicroWS:
     """WebSocket client: watchlist price-up detection + position SL/resolution.
 
     Each tracked entry is keyed by ws_key (e.g. "market_id_YES" or "market_id_NO").
-    Subscribes to the specific token for the side we care about.
-    Prices are always from the perspective of the side we bought
-    (i.e. if we buy NO, price = 1 - yes_token_price).
+    ALWAYS subscribes to the YES token. For NO side, prices are inverted
+    (price = 1 - yes_token_price) so all callbacks see the correct side price.
     """
 
     def __init__(self):
@@ -241,13 +240,15 @@ class MicroWS:
         asks = data.get("asks", [])
 
         if not invert:
-            # YES token: bid = our bid, ask = our ask
+            # YES side: YES token bid/ask = our bid/ask directly
             if bids:
                 info["best_bid"] = float(bids[0].get("price", 0))
             if asks:
                 info["best_ask"] = float(asks[0].get("price", 0))
         else:
-            # NO token: our bid = 1 - their ask, our ask = 1 - their bid
+            # NO side: subscribed to YES token, invert to get NO prices
+            # NO bid = 1 - YES ask (what we'd get selling NO)
+            # NO ask = 1 - YES bid (what we'd pay buying NO)
             if asks:
                 info["best_bid"] = round(1.0 - float(asks[0].get("price", 0)), 4)
             if bids:
