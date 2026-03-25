@@ -2,12 +2,14 @@
 quant-micro — Resolution harvester for Polymarket.
 
 Strategy:
-  1. Scanner finds NON-RISKY markets expiring within 2 days:
+  1. Scanner finds NON-RISKY markets expiring within 5 days:
      a) ≥93¢ → enter immediately (high probability, near resolution)
      b) 88-93¢ → watchlist, WS monitors. When price hits 93¢ → enter
   2. WS monitors positions: dynamic SL (3-7%), resolution at ≥99¢
-  3. Micro stakes ($1-3), quality-scored, risky themes excluded
+  3. Micro stakes ($1-5), quality-scored, risky patterns excluded
   4. Time-based exit: close if price < entry with <4h to resolution
+  5. Risky filter: sports/esports always blocked; crypto/markets only blocked
+     if question is a PRICE BET (will X be above $Y). Non-price crypto OK.
 """
 
 import asyncio
@@ -34,13 +36,13 @@ CONFIG = {
     "BANKROLL":           float(os.getenv("BANKROLL", "500")),
     "SIMULATION":         os.getenv("SIMULATION", "true").lower() == "true",
     "SCAN_INTERVAL":      int(os.getenv("SCAN_INTERVAL", "120")),
-    "MAX_STAKE":          float(os.getenv("MAX_STAKE", "3.0")),       # lowered: $3 max
+    "MAX_STAKE":          float(os.getenv("MAX_STAKE", "5.0")),       # $5 max
     "MIN_STAKE":          float(os.getenv("MIN_STAKE", "1.0")),
     "MAX_OPEN":           int(os.getenv("MAX_OPEN", "50")),           # focused: 50 not 150
     "SL_PCT":             float(os.getenv("SL_PCT", "0.05")),        # tighter: 5% default
     "ENTRY_MIN_PRICE":    float(os.getenv("ENTRY_MIN_PRICE", "0.93")), # raised: 93¢
     "WATCHLIST_MIN_PRICE": float(os.getenv("WATCHLIST_MIN_PRICE", "0.88")), # raised: 88¢
-    "MAX_DAYS_LEFT":      float(os.getenv("MAX_DAYS_LEFT", "2")),    # tighter: 2 days
+    "MAX_DAYS_LEFT":      float(os.getenv("MAX_DAYS_LEFT", "5")),    # 5 days — more candidates
     "MIN_ROI":            float(os.getenv("MIN_ROI", "0.03")),
     "MIN_LIQUIDITY_MULT": float(os.getenv("MIN_LIQUIDITY_MULT", "500")),
     "MAX_SPREAD":         float(os.getenv("MAX_SPREAD", "0.02")),    # tighter: 2¢
@@ -151,8 +153,10 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         sl_pct = 0.07  # 7% — resolves very soon, hold tighter
     elif days_left <= 1:
         sl_pct = 0.05  # 5%
+    elif days_left <= 2:
+        sl_pct = 0.04  # 4% — 1-2 days
     else:
-        sl_pct = 0.03  # 3% — 1-2 days, cut losses fast
+        sl_pct = 0.03  # 3% — 2-5 days, cut losses fast
 
     # ── Execute ──
     pos_id = f"mic_{market_id[:8]}_{int(time.time())}"
@@ -420,6 +424,12 @@ async def main():
 
     db = Database()
     await db.init()
+
+    # ── Fresh start: reset all stats, positions, watchlist ──
+    RESET_ON_START = os.getenv("RESET_ON_START", "false").lower() == "true"
+    if RESET_ON_START:
+        await db.reset_stats(CONFIG["BANKROLL"])
+        log.info(f"[MAIN] RESET: clean slate, bankroll=${CONFIG['BANKROLL']}")
 
     tg = TelegramBot(CONFIG["TELEGRAM_TOKEN"], CONFIG["TELEGRAM_CHAT_ID"])
     scanner = MicroScanner(CONFIG)

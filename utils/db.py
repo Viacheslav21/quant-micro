@@ -253,6 +253,20 @@ class Database:
                 bankroll,
             )
 
+    async def reset_stats(self, bankroll: float):
+        """Full reset: close all positions, clear stats, clear watchlist, clear log."""
+        async with self.pool.acquire() as conn:
+            await conn.execute("DELETE FROM micro_positions")
+            await conn.execute("DELETE FROM micro_watchlist")
+            await conn.execute("DELETE FROM micro_log")
+            await conn.execute("""
+                UPDATE micro_stats SET
+                    bankroll = $1, total_pnl = 0, wins = 0, losses = 0,
+                    total_trades = 0, peak_equity = $1, updated_at = NOW()
+                WHERE id = 1
+            """, bankroll)
+        log.info(f"[DB] Full reset: bankroll=${bankroll}, all positions/watchlist/log cleared")
+
     # ── Logging ──
 
     async def log_event(self, event_type: str, market_id: str = None, details: dict = None):

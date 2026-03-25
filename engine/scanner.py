@@ -25,16 +25,19 @@ THEME_KEYWORDS = {
     "celeb":       ["elon", "musk", "kanye", "celebrity"],
 }
 
-# Themes with high gap risk — price jumps from 90¢ to 0¢ on resolution
-RISKY_THEMES = {"crypto", "sports", "esports", "markets"}
+# Themes with ALWAYS-risky gap risk (sports scores, esports matches)
+RISKY_THEMES = {"sports", "esports"}
 
-# Question patterns that indicate volatile/unpredictable outcomes
+# Question patterns that indicate volatile/unpredictable price-based outcomes
+# These are risky regardless of theme — price can gap from 95¢ to 0¢
 _RISKY_PATTERNS = [
     re.compile(r"price of .+ (above|below|reach|hit|dip)", re.I),
     re.compile(r"will .+ (beat|defeat|win against|lose to)", re.I),
     re.compile(r"(above|below|over|under) \$[\d,]+", re.I),
     re.compile(r" vs\.? ", re.I),
     re.compile(r"(score|goals?|points?) (over|under)", re.I),
+    re.compile(r"(dip|crash|pump|surge) to \$", re.I),
+    re.compile(r"market cap .*(above|below|over|under)", re.I),
 ]
 
 
@@ -47,7 +50,11 @@ def classify_theme(question: str) -> str:
 
 
 def is_risky_market(question: str, theme: str) -> bool:
-    """Markets where high price does NOT mean safe resolution."""
+    """Markets where high price does NOT mean safe resolution.
+    Sports/esports: always risky (score-based, unpredictable).
+    Crypto/markets: only risky if it's a PRICE BET (will X be above $Y).
+    Non-price crypto questions (will X be released, will hack happen) are fine.
+    """
     if theme in RISKY_THEMES:
         return True
     for pat in _RISKY_PATTERNS:
@@ -71,6 +78,10 @@ def quality_score(price: float, spread: float, days_left: float,
         score += 15
     elif days_left <= 2:
         score += 10
+    elif days_left <= 3:
+        score += 7
+    elif days_left <= 5:
+        score += 5
     # Volume/liquidity bonus (0-10)
     if volume > 500_000:
         score += 10
@@ -181,6 +192,9 @@ class MicroScanner:
                 # Skip risky markets — these have gap risk
                 if is_risky_market(question, theme):
                     skipped_risky += 1
+                    # Log first few skips at DEBUG so we can see what's being filtered
+                    if skipped_risky <= 5:
+                        log.debug(f"[Scanner] Risky skip: {theme} '{question[:60]}' yes={yes_price:.2f} days={days_left:.1f}")
                     continue
 
                 yes_token, no_token = _parse_token_ids(m)
