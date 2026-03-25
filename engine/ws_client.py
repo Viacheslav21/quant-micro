@@ -12,6 +12,7 @@ WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 HEARTBEAT_INTERVAL = 10
 RECONNECT_DELAY = 5
 BATCH_SIZE = 100
+DIP_CHECK_INTERVAL = 2.0  # min seconds between dip checks per market
 
 
 class MicroWS:
@@ -24,6 +25,7 @@ class MicroWS:
         self._token_to_market: dict[str, str] = {}
         self._token_side: dict[str, str] = {}  # token_id -> "yes" / "no"
         self.prices: dict[str, dict] = {}  # market_id -> {yes_price, best_bid, best_ask, ...}
+        self._last_dip_check: dict[str, float] = {}  # market_id -> timestamp (throttle)
 
         # Callbacks
         self._on_watchlist_dip: Optional[Callable] = None
@@ -59,7 +61,7 @@ class MicroWS:
         if market_id not in self.prices:
             self.prices[market_id] = {
                 "yes_price": yes_price,
-                "best_bid": 0,
+                "best_bid": yes_price,  # init to yes_price so spread starts at 0 (not huge)
                 "best_ask": yes_price,
                 "question": question,
                 "yes_token": yes_token,
@@ -200,6 +202,29 @@ class MicroWS:
             except Exception:
                 break
 
+    # ── Dispatch ──
+
+    async def _dispatch(self, market_id: str, info: dict):
+        """Dispatch to appropriate callback with throttling for watchlist dip checks."""
+        now_price = info["yes_price"]
+
+        if info.get("is_position") and self._on_position_price:
+            try:
+                await self._on_position_price(market_id, now_price, info)
+            except Exception as e:
+                log.error(f"[WS] position callback error: {e}")
+        elif not info.get("is_position") and self._on_watchlist_dip:
+            # Throttle dip checks to avoid DB flood
+            now = time.time()
+            last = self._last_dip_check.get(market_id, 0)
+            if now - last < DIP_CHECK_INTERVAL:
+                return
+            self._last_dip_check[market_id] = now
+            try:
+                await self._on_watchlist_dip(market_id, now_price, info)
+            except Exception as e:
+                log.error(f"[WS] watchlist callback error: {e}")
+
     # ── Message Handling ──
 
     async def _handle_message(self, data):
@@ -245,17 +270,7 @@ class MicroWS:
         if now_price > info.get("peak_price", 0):
             info["peak_price"] = now_price
 
-        # Dispatch to appropriate callback
-        if info.get("is_position") and self._on_position_price:
-            try:
-                await self._on_position_price(market_id, now_price, info)
-            except Exception as e:
-                log.error(f"[WS] position callback error: {e}")
-        elif not info.get("is_position") and self._on_watchlist_dip:
-            try:
-                await self._on_watchlist_dip(market_id, now_price, info)
-            except Exception as e:
-                log.error(f"[WS] watchlist callback error: {e}")
+        await self._dispatch(market_id, info)
 
     async def _handle_book(self, data):
         token_id = data.get("asset_id", "")
@@ -283,13 +298,7 @@ class MicroWS:
 
         info["last_update"] = time.time()
 
-        # Also trigger position callback on book updates (for SL/TP on bid price)
-        if info.get("is_position") and self._on_position_price:
-            now_price = info["yes_price"]
-            try:
-                await self._on_position_price(market_id, now_price, info)
-            except Exception as e:
-                log.error(f"[WS] position callback error: {e}")
+        await self._dispatch(market_id, info)
 
     async def _handle_trade(self, data):
         token_id = data.get("asset_id", "")
@@ -315,13 +324,4 @@ class MicroWS:
         if now_price > info.get("peak_price", 0):
             info["peak_price"] = now_price
 
-        if info.get("is_position") and self._on_position_price:
-            try:
-                await self._on_position_price(market_id, now_price, info)
-            except Exception as e:
-                log.error(f"[WS] position callback error: {e}")
-        elif not info.get("is_position") and self._on_watchlist_dip:
-            try:
-                await self._on_watchlist_dip(market_id, now_price, info)
-            except Exception as e:
-                log.error(f"[WS] watchlist callback error: {e}")
+        await self._dispatch(market_id, info)

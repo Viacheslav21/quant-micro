@@ -183,27 +183,27 @@ class Database:
             return [dict(r) for r in rows]
 
     async def close_position(self, pos_id: str, pnl: float, result: str, reason: str) -> bool:
-        """Atomic close with race protection."""
+        """Atomic close with race protection. Returns stake + pnl to bankroll."""
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("""
                 UPDATE micro_positions
                 SET status = 'closed', pnl = $2, result = $3, close_reason = $4,
                     closed_at = NOW()
                 WHERE id = $1 AND status = 'open'
-                RETURNING id
+                RETURNING id, stake_amt
             """, pos_id, pnl, result, reason)
             if row:
-                sign = 1 if result == "WIN" else -1
+                stake = row["stake_amt"]
                 await conn.execute("""
                     UPDATE micro_stats SET
-                        bankroll     = bankroll + $1,
-                        total_pnl    = total_pnl + $1,
-                        wins         = wins + CASE WHEN $2 = 'WIN' THEN 1 ELSE 0 END,
-                        losses       = losses + CASE WHEN $2 = 'LOSS' THEN 1 ELSE 0 END,
+                        bankroll     = bankroll + $1 + $2,
+                        total_pnl    = total_pnl + $2,
+                        wins         = wins + CASE WHEN $3 = 'WIN' THEN 1 ELSE 0 END,
+                        losses       = losses + CASE WHEN $3 = 'LOSS' THEN 1 ELSE 0 END,
                         total_trades = total_trades + 1,
                         updated_at   = NOW()
                     WHERE id = 1
-                """, pnl, result)
+                """, stake, pnl, result)
                 return True
             return False
 
@@ -216,6 +216,13 @@ class Database:
             """, pos_id, price, unrealized_pnl)
 
     # ── Stats ──
+
+    async def deduct_stake(self, stake: float):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE micro_stats SET bankroll = bankroll - $1, updated_at = NOW() WHERE id = 1",
+                stake,
+            )
 
     async def get_stats(self) -> dict:
         async with self.pool.acquire() as conn:

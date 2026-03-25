@@ -79,12 +79,9 @@ class MicroScanner:
                         raw_prices = _json.loads(raw_prices)
                     yes_price = float(raw_prices[0])
 
-                    # Watchlist zone filter
+                    # Watchlist zone filter (YES side only — we buy YES tokens)
                     if not (min_price <= yes_price <= max_price):
-                        # Also check NO side (high NO price = low YES price)
-                        no_price = 1.0 - yes_price
-                        if not (min_price <= no_price <= max_price):
-                            continue
+                        continue
 
                     spread = float(m.get("spread") or 0)
                     if spread > max_spread:
@@ -94,7 +91,7 @@ class MicroScanner:
                     question = m.get("question", "")
 
                     candidates.append({
-                        "market_id": m["id"],
+                        "market_id": str(m["id"]),
                         "question":  question,
                         "theme":     classify_theme(question),
                         "yes_price": round(yes_price, 4),

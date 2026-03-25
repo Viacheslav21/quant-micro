@@ -174,6 +174,7 @@ async def check_dip_entry(market_id: str, price: float, info: dict,
     }
 
     await db.save_position(pos)
+    await db.deduct_stake(stake)
     _cooldowns[market_id] = time.time()
 
     # Mark in WS as position (triggers position monitoring instead of dip detection)
@@ -235,7 +236,7 @@ async def check_position_price(market_id: str, price: float, info: dict,
 
     # ── Resolution detection ──
     if price >= CONFIG["RESOLUTION_PRICE"]:
-        pnl = (1.0 - entry_price) * stake  # full resolution payout
+        pnl = ((1.0 - entry_price) / entry_price) * stake  # profit from resolution
         closed = await db.close_position(pos["id"], round(pnl, 4), "WIN", "resolved")
         if closed:
             ws.unmark_position(market_id)
@@ -374,8 +375,14 @@ async def main():
 
             # 2. Update watchlist in DB + register in WS
             new_count = 0
+            current_ids = set()
             for c in candidates:
                 await db.upsert_watchlist(c)
+                current_ids.add(c["market_id"])
+
+                # Reset peak to current price each scan (prevents stale peaks)
+                if c["market_id"] in ws.prices:
+                    ws.prices[c["market_id"]]["peak_price"] = c["yes_price"]
 
                 # Register in WS if not already tracked
                 if c["market_id"] not in ws.prices:
