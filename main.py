@@ -449,16 +449,33 @@ async def main():
     )
 
     # Restore open positions into WS
+    # Fetch fresh token IDs from Polymarket API for each open position
     open_pos = await db.get_open_positions()
+    restored = 0
     for pos in open_pos:
-        wl = await db.get_watchlist_market(pos["market_id"])
         side = pos.get("side", "YES")
         ws_key = f"{pos['market_id']}_{side}"
-        if wl:
-            # ALWAYS subscribe to YES token. For NO side, ws_client inverts the price.
-            token_id = wl.get("yes_token")
-        else:
-            token_id = None
+
+        # Try watchlist first (fast, local)
+        wl = await db.get_watchlist_market(pos["market_id"])
+        token_id = wl.get("yes_token") if wl else None
+
+        # If no token in watchlist, fetch from API
+        if not token_id:
+            try:
+                import json as _json
+                r = await scanner.client.get(f"https://gamma-api.polymarket.com/markets/{pos['market_id']}")
+                if r.status_code == 200:
+                    mdata = r.json()
+                    tids = mdata.get("clobTokenIds") or []
+                    if isinstance(tids, str):
+                        tids = _json.loads(tids)
+                    token_id = tids[0] if tids else None  # YES token
+                    if token_id:
+                        log.info(f"[RESTORE] Fetched YES token for {pos['market_id'][:8]} from API")
+            except Exception as e:
+                log.warning(f"[RESTORE] Failed to fetch token for {pos['market_id'][:8]}: {e}")
+
         if token_id:
             ws.register_market(
                 ws_key,
@@ -468,8 +485,11 @@ async def main():
                 question=pos.get("question", ""),
                 is_position=True,
             )
+            restored += 1
+        else:
+            log.warning(f"[RESTORE] No token for {pos['market_id'][:8]} {side} — will not monitor")
     if open_pos:
-        log.info(f"[MAIN] Restored {len(open_pos)} open positions to WS")
+        log.info(f"[MAIN] Restored {restored}/{len(open_pos)} positions to WS")
 
     ws_task = asyncio.create_task(ws.connect())
 
