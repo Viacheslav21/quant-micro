@@ -251,7 +251,8 @@ async def check_watchlist_price(ws_key: str, price: float, info: dict,
         "quality": wl.get("quality", wl.get("roi", 0) * 500),  # estimate if not stored
         "yes_token": wl.get("yes_token"),
         "no_token": wl.get("no_token"),
-        "ws_token": info.get("token_id"),
+        # Always use YES token for WS; ws_side tells client to invert for NO
+        "ws_token": wl.get("yes_token"),
         "ws_side": "no" if side == "NO" else "yes",
         "end_date": wl.get("end_date"),
     }
@@ -298,7 +299,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
 
     await db.update_position_price(pos["id"], bid_price, round(pnl_dollar, 4))
 
-    # ── Resolution ──
+    # ── Resolution WIN: our side price → 99¢+ ──
     if price >= CONFIG["RESOLUTION_PRICE"]:
         pnl = ((1.0 - entry_price) / entry_price) * stake
         closed = await db.close_position(pos["id"], round(pnl, 4), "WIN", "resolved")
@@ -310,6 +311,24 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             })
             await tg.send(
                 f"<b>RESOLVED WIN</b> {side}\n{pos['question'][:60]}\nPnL: +${pnl:.2f}"
+            )
+        return
+
+    # ── Resolution LOSS: our side price → ≤3¢ (resolved against us) ──
+    # Use 3¢ threshold — 5¢ could be normal low-liquidity spread
+    if bid_price <= 0.03:
+        pnl = -stake  # lost entire stake
+        closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "resolved_against")
+        if closed:
+            ws.unmark_position(ws_key)
+            log.info(f"[RESOLVED] LOSS {side} '{pos['question'][:40]}' PnL: ${pnl:.2f} (resolved against)")
+            await db.log_event("CLOSE_RESOLVED_LOSS", market_id, {
+                "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
+            })
+            await tg.send(
+                f"⚠️ <b>RESOLVED AGAINST</b> {side}\n{pos['question'][:60]}\n"
+                f"Entry: {entry_price:.2f}¢ → {bid_price:.2f}¢\n"
+                f"PnL: ${pnl:.2f} (full loss)"
             )
         return
 
@@ -454,14 +473,15 @@ async def main():
         side = pos.get("side", "YES")
         ws_key = f"{pos['market_id']}_{side}"
         if wl:
-            token_id = wl.get("yes_token") if side == "YES" else wl.get("no_token")
+            # ALWAYS subscribe to YES token. For NO side, ws_client inverts the price.
+            token_id = wl.get("yes_token")
         else:
             token_id = None
         if token_id:
             ws.register_market(
                 ws_key,
                 token_id=token_id,
-                token_side=side.lower(),
+                token_side=side.lower(),  # "no" → ws_client will invert
                 price=pos.get("entry_price", 0.9),
                 question=pos.get("question", ""),
                 is_position=True,
@@ -514,6 +534,8 @@ async def main():
                 await db.upsert_watchlist(c)
                 ws_key = f"{c['market_id']}_{c['side']}"
                 if ws_key not in ws.prices:
+                    # ws_token already points to YES token (scanner fixed)
+                    # ws_side tells ws_client whether to invert
                     tokens = ws.register_market(
                         ws_key,
                         token_id=c.get("ws_token"),

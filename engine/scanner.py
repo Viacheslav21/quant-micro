@@ -38,6 +38,14 @@ _RISKY_PATTERNS = [
     re.compile(r"(score|goals?|points?) (over|under)", re.I),
     re.compile(r"(dip|crash|pump|surge) to \$", re.I),
     re.compile(r"market cap .*(above|below|over|under)", re.I),
+    # Counting/mention/range markets — exact number bets gap to 0 on resolution
+    re.compile(r"(post|tweet|send|write|publish)\s+\d+[\s-]+\d+", re.I),  # "post 340-359 tweets"
+    re.compile(r"\d+[\s-]+\d+\s+(tweets?|posts?|times?|mentions?)", re.I),  # "340-359 tweets"
+    re.compile(r"\b\d+-\d+\b.*\b(tweets?|posts?|goals?|points?|runs?|yards?)\b", re.I),  # range bets
+    re.compile(r"(exactly|between)\s+\d+", re.I),  # "exactly 5", "between 10 and 20"
+    re.compile(r"(more|fewer|less) than \d+ (tweets?|posts?|times?)", re.I),  # counting bets
+    re.compile(r"how many", re.I),  # "how many times will X"
+    re.compile(r"(mention|say|use the word)", re.I),  # mention markets
 ]
 
 
@@ -224,14 +232,18 @@ class MicroScanner:
                         if q >= min_quality:
                             best_bid_yes = float(m.get("bestBid") or yes_price)
                             no_best_ask = round(1.0 - best_bid_yes, 4)
+                            # Subscribe to YES token but invert prices for NO side
+                            # NO token prices from WS are already NO-perspective,
+                            # so subscribing to NO token + inverting = double inversion = WRONG
+                            # Instead: subscribe to YES token + invert → correct NO price
                             candidates_for_market.append({
                                 "side": "NO",
                                 "price": no_price,
                                 "best_ask": no_best_ask,
                                 "roi": roi,
                                 "quality": q,
-                                "ws_token": no_token,
-                                "ws_side": "no",
+                                "ws_token": yes_token,   # USE YES TOKEN
+                                "ws_side": "no",          # but mark as NO → will invert
                             })
 
                 for info in candidates_for_market:
