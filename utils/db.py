@@ -27,15 +27,15 @@ class Database:
                     question     TEXT NOT NULL,
                     theme        TEXT DEFAULT 'other',
                     yes_price    REAL NOT NULL,
-                    no_price     REAL DEFAULT 0,
                     volume       REAL DEFAULT 0,
                     liquidity    REAL DEFAULT 0,
                     spread       REAL DEFAULT 0,
                     best_ask     REAL DEFAULT 0,
-                    peak_price   REAL DEFAULT 0,
+                    days_left    REAL DEFAULT 0,
+                    end_date     TEXT,
+                    roi          REAL DEFAULT 0,
                     yes_token    TEXT,
                     no_token     TEXT,
-                    neg_risk     BOOLEAN DEFAULT FALSE,
                     added_at     TIMESTAMPTZ DEFAULT NOW(),
                     updated_at   TIMESTAMPTZ DEFAULT NOW()
                 );
@@ -94,9 +94,18 @@ class Database:
                 ON CONFLICT (id) DO NOTHING;
             """)
             # Migrations
-            await conn.execute("""
-                ALTER TABLE micro_watchlist DROP COLUMN IF EXISTS end_date;
-            """)
+            for col, typ, default in [
+                ("days_left", "REAL", "0"),
+                ("end_date", "TEXT", "NULL"),
+                ("roi", "REAL", "0"),
+            ]:
+                await conn.execute(f"""
+                    ALTER TABLE micro_watchlist ADD COLUMN IF NOT EXISTS {col} {typ} DEFAULT {default};
+                """)
+            for col in ["no_price", "peak_price", "neg_risk"]:
+                await conn.execute(f"""
+                    ALTER TABLE micro_watchlist DROP COLUMN IF EXISTS {col};
+                """)
         log.info("[DB] Schema ready")
 
     # ── Watchlist ──
@@ -105,27 +114,27 @@ class Database:
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO micro_watchlist
-                    (market_id, question, theme, yes_price, no_price,
-                     volume, liquidity, spread, best_ask, peak_price,
-                     yes_token, no_token, neg_risk)
+                    (market_id, question, theme, yes_price,
+                     volume, liquidity, spread, best_ask,
+                     days_left, end_date, roi, yes_token, no_token)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                 ON CONFLICT (market_id) DO UPDATE SET
                     yes_price  = EXCLUDED.yes_price,
-                    no_price   = EXCLUDED.no_price,
                     volume     = EXCLUDED.volume,
                     liquidity  = EXCLUDED.liquidity,
                     spread     = EXCLUDED.spread,
                     best_ask   = EXCLUDED.best_ask,
-                    peak_price = GREATEST(micro_watchlist.peak_price, EXCLUDED.yes_price),
+                    days_left  = EXCLUDED.days_left,
+                    roi        = EXCLUDED.roi,
                     updated_at = NOW()
             """,
                 market["market_id"], market["question"], market.get("theme", "other"),
-                market["yes_price"], market.get("no_price", 0),
+                market.get("price", market.get("yes_price", 0)),
                 market.get("volume", 0), market.get("liquidity", 0),
                 market.get("spread", 0), market.get("best_ask", 0),
-                market.get("yes_price"),  # initial peak = current price
+                market.get("days_left", 0), market.get("end_date"),
+                market.get("roi", 0),
                 market.get("yes_token"), market.get("no_token"),
-                market.get("neg_risk", False),
             )
 
     async def get_watchlist(self) -> list:
@@ -140,16 +149,6 @@ class Database:
             await conn.execute(
                 "DELETE FROM micro_watchlist WHERE market_id = $1", market_id
             )
-
-    async def update_watchlist_price(self, market_id: str, price: float):
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-                UPDATE micro_watchlist
-                SET yes_price  = $2,
-                    peak_price = GREATEST(peak_price, $2),
-                    updated_at = NOW()
-                WHERE market_id = $1
-            """, market_id, price)
 
     async def get_watchlist_market(self, market_id: str) -> Optional[dict]:
         async with self.pool.acquire() as conn:
@@ -268,12 +267,18 @@ class Database:
             """)
             log.debug(f"[DB] Watchlist cleanup: {deleted}")
 
-    async def has_position_on_market(self, market_id: str) -> bool:
+    async def has_position_on_market(self, market_id: str, side: str = None) -> bool:
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT 1 FROM micro_positions WHERE market_id = $1 AND status = 'open'",
-                market_id,
-            )
+            if side:
+                row = await conn.fetchrow(
+                    "SELECT 1 FROM micro_positions WHERE market_id = $1 AND side = $2 AND status = 'open'",
+                    market_id, side,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT 1 FROM micro_positions WHERE market_id = $1 AND status = 'open'",
+                    market_id,
+                )
             return row is not None
 
     async def close(self):

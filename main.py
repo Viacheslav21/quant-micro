@@ -1,13 +1,12 @@
 """
-quant-micro — Micro-stake sniper for high-probability Polymarket markets.
+quant-micro — Resolution harvester for Polymarket.
 
 Strategy:
-  1. Scanner finds markets at 85-95¢ (high probability, near resolution)
-  2. Markets go into watchlist, WebSocket monitors prices in real-time
-  3. On dip (price drops DIP_TRIGGER_PCT from peak) → enter with micro stake ($1-5)
-  4. SL: 10% from entry (hard cut — something changed if it drops that much)
-  5. TP: resolution to 100¢, or configurable profit target
-  6. Many small positions (up to 150) = smooth equity curve
+  1. Scanner finds markets expiring within 7 days:
+     a) ≥90¢ → enter immediately (high probability, near resolution)
+     b) 85-90¢ → watchlist, WS monitors. When price hits 90¢ → enter
+  2. WS monitors positions: SL 10%, resolution at ≥99¢
+  3. Micro stakes ($1-5), many positions = smooth equity curve
 """
 
 import asyncio
@@ -37,16 +36,15 @@ CONFIG = {
     "MIN_STAKE":          float(os.getenv("MIN_STAKE", "1.0")),
     "MAX_OPEN":           int(os.getenv("MAX_OPEN", "150")),
     "SL_PCT":             float(os.getenv("SL_PCT", "0.10")),
-    "TP_PCT":             float(os.getenv("TP_PCT", "0.05")),
+    "ENTRY_MIN_PRICE":    float(os.getenv("ENTRY_MIN_PRICE", "0.90")),
     "WATCHLIST_MIN_PRICE": float(os.getenv("WATCHLIST_MIN_PRICE", "0.85")),
-    "WATCHLIST_MAX_PRICE": float(os.getenv("WATCHLIST_MAX_PRICE", "0.95")),
-    "DIP_TRIGGER_PCT":    float(os.getenv("DIP_TRIGGER_PCT", "0.02")),
-    "MIN_VOLUME":         float(os.getenv("MIN_VOLUME", "50000")),
-    "MIN_LIQUIDITY":      float(os.getenv("MIN_LIQUIDITY", "5000")),
+    "MAX_DAYS_LEFT":      float(os.getenv("MAX_DAYS_LEFT", "3")),
+    "MIN_ROI":            float(os.getenv("MIN_ROI", "0.03")),
+    "MIN_LIQUIDITY_MULT": float(os.getenv("MIN_LIQUIDITY_MULT", "500")),  # liquidity >= stake * mult
     "MAX_SPREAD":         float(os.getenv("MAX_SPREAD", "0.03")),
     "RESOLUTION_PRICE":   float(os.getenv("RESOLUTION_PRICE", "0.99")),
     "MAX_PER_THEME":      int(os.getenv("MAX_PER_THEME", "20")),
-    "CONFIG_TAG":         os.getenv("CONFIG_TAG", "micro-v1"),
+    "CONFIG_TAG":         os.getenv("CONFIG_TAG", "micro-v2"),
 }
 
 # ── Logging ──
@@ -65,8 +63,6 @@ log = logging.getLogger("micro")
 # ── Globals ──
 
 _shutdown = False
-_cooldowns: dict[str, float] = {}  # market_id -> last entry timestamp
-COOLDOWN_SEC = 300  # 5 min cooldown per market after entry
 
 
 def _handle_signal(sig, frame):
@@ -79,151 +75,183 @@ signal.signal(signal.SIGTERM, _handle_signal)
 signal.signal(signal.SIGINT, _handle_signal)
 
 
-# ── Core Logic ──
+# ── Entry Logic ──
 
-async def check_dip_entry(market_id: str, price: float, info: dict,
-                          db: Database, ws: MicroWS, tg: TelegramBot):
-    """Called by WS when a watchlist market price updates. Check for dip entry."""
-    if _shutdown:
-        return
+async def try_enter(candidate: dict, db: Database, ws: MicroWS,
+                    tg: TelegramBot, source: str = "scan") -> bool:
+    """Try to enter a position. Returns True if entered."""
+    market_id = candidate["market_id"]
+    side = candidate.get("side", "YES")
 
-    peak = info.get("peak_price", price)
-    if peak <= 0:
-        return
+    if await db.has_position_on_market(market_id, side):
+        return False
 
-    dip_pct = (peak - price) / peak
-    if dip_pct < CONFIG["DIP_TRIGGER_PCT"]:
-        return  # no dip yet
-
-    log.info(f"[DIP] Detected {dip_pct:.1%} dip on {market_id[:8]} "
-             f"peak={peak:.3f} now={price:.3f} q='{info.get('question', '')[:40]}'")
-
-    # Price must still be in a reasonable range (not crashing)
-    if price < 0.80:
-        return
-
-    # Cooldown check
-    last_entry = _cooldowns.get(market_id, 0)
-    if time.time() - last_entry < COOLDOWN_SEC:
-        return
-
-    # Spread check from live WS data
-    spread = ws.get_spread(market_id)
-    if spread > CONFIG["MAX_SPREAD"]:
-        log.debug(f"[DIP] Skip {market_id[:8]}: spread {spread:.3f} > {CONFIG['MAX_SPREAD']}")
-        return
-
-    # Already have position?
-    if await db.has_position_on_market(market_id):
-        return
-
-    # Max open check
     open_pos = await db.get_open_positions()
     if len(open_pos) >= CONFIG["MAX_OPEN"]:
-        return
+        return False
 
-    # Theme limit check
-    question = info.get("question", "")
-    theme = "other"
-    wl = await db.get_watchlist_market(market_id)
-    if wl:
-        theme = wl.get("theme", "other")
-
+    theme = candidate.get("theme", "other")
     theme_count = sum(1 for p in open_pos if p.get("theme") == theme)
     if theme_count >= CONFIG["MAX_PER_THEME"]:
-        log.debug(f"[DIP] Skip: theme '{theme}' full ({theme_count})")
-        return
+        return False
 
-    # Compute stake
     stats = await db.get_stats()
     bankroll = stats.get("bankroll", CONFIG["BANKROLL"])
-    stake = min(CONFIG["MAX_STAKE"], bankroll * 0.01)  # 1% of bankroll, capped at MAX_STAKE
+    stake = min(CONFIG["MAX_STAKE"], bankroll * 0.01)
     stake = round(stake, 2)
 
     if stake < CONFIG["MIN_STAKE"]:
-        log.warning(f"[DIP] Stake ${stake:.2f} too small, skipping")
-        return
+        log.warning(f"[ENTRY] Stake ${stake:.2f} too small")
+        return False
 
-    # Entry price = best ask (what we'd actually pay)
-    entry_price = info.get("best_ask", price)
+    entry_price = candidate.get("best_ask") or candidate["price"]
     if entry_price <= 0:
-        entry_price = price
+        entry_price = candidate["price"]
 
-    # Expected profit at resolution
-    profit_at_resolve = (1.0 - entry_price) * stake
-    roi_at_resolve = (1.0 - entry_price) / entry_price
+    roi = (1.0 - entry_price) / entry_price
+    if roi < CONFIG["MIN_ROI"]:
+        return False
 
-    # Only enter if ROI at resolution > 3% (very conservative floor)
-    if roi_at_resolve < 0.03:
-        return
+    # ── Dynamic SL: tighter for longer-dated markets ──
+    days_left = candidate.get("days_left", 0)
+    if days_left <= 1:
+        sl_pct = 0.10  # 10% — resolves soon, hold tight
+    elif days_left <= 2:
+        sl_pct = 0.07  # 7% — more can happen
+    else:
+        sl_pct = 0.05  # 5% — 2-3 days, cut losses fast
 
     # ── Execute ──
-
     pos_id = f"mic_{market_id[:8]}_{int(time.time())}"
     pos = {
         "id": pos_id,
         "market_id": market_id,
-        "question": question or info.get("question", ""),
+        "question": candidate["question"],
         "theme": theme,
-        "side": "YES",
+        "side": side,
         "entry_price": round(entry_price, 4),
         "stake_amt": stake,
-        "tp_pct": CONFIG["TP_PCT"],
-        "sl_pct": CONFIG["SL_PCT"],
+        "sl_pct": sl_pct,
         "config_tag": CONFIG["CONFIG_TAG"],
     }
 
     await db.save_position(pos)
     await db.deduct_stake(stake)
-    _cooldowns[market_id] = time.time()
 
-    # Mark in WS as position (triggers position monitoring instead of dip detection)
-    ws.mark_as_position(market_id)
+    # Save to watchlist so token IDs survive restart
+    await db.upsert_watchlist(candidate)
+
+    # Register in WS for position monitoring
+    # Use the specific token for the side we bought
+    ws_key = f"{market_id}_{side}"
+    ws.mark_as_position(ws_key)
+    if ws_key not in ws.prices:
+        ws_token = candidate.get("ws_token")
+        ws_side = candidate.get("ws_side", side.lower())
+        tokens = ws.register_market(
+            ws_key,
+            token_id=ws_token,
+            token_side=ws_side,
+            price=entry_price,
+            question=candidate["question"],
+            is_position=True,
+        )
+        if tokens:
+            await ws.subscribe_tokens(tokens)
 
     mode = "SIM" if CONFIG["SIMULATION"] else "REAL"
+    days = candidate.get("days_left", "?")
     log.info(
-        f"[ENTRY] {mode} YES '{question[:50]}' @ {entry_price:.2f}¢ "
-        f"${stake:.2f} | dip {dip_pct:.1%} from peak {peak:.2f}¢ | "
-        f"ROI@resolve {roi_at_resolve:.1%}"
+        f"[ENTRY] {mode} {source.upper()} {side} '{candidate['question'][:50]}' "
+        f"@ {entry_price:.2f}¢ ${stake:.2f} | ROI {roi:.1%} | SL {sl_pct:.0%} | {days}d left"
     )
 
     await db.log_event("OPEN", market_id, {
-        "entry_price": entry_price, "stake": stake, "dip_pct": round(dip_pct, 4),
-        "peak": peak, "spread": round(spread, 4), "roi_at_resolve": round(roi_at_resolve, 4),
-        "mode": mode,
+        "side": side, "entry_price": entry_price, "stake": stake,
+        "roi": round(roi, 4), "days_left": days,
+        "spread": candidate.get("spread", 0), "source": source, "mode": mode,
     })
 
     await tg.send(
-        f"<b>MICRO</b> {'SIM' if CONFIG['SIMULATION'] else 'REAL'}\n"
-        f"YES <b>{question[:60]}</b>\n"
+        f"<b>MICRO {source.upper()}</b> {mode}\n"
+        f"{side} <b>{candidate['question'][:60]}</b>\n"
         f"Entry: {entry_price:.2f}¢ | Stake: ${stake:.2f}\n"
-        f"Dip: {dip_pct:.1%} | ROI@resolve: {roi_at_resolve:.1%}"
+        f"ROI: {roi:.1%} | {days}d left"
     )
+    return True
 
 
-async def check_position_price(market_id: str, price: float, info: dict,
+# ── WS Watchlist Callback ──
+
+async def check_watchlist_price(ws_key: str, price: float, info: dict,
+                                 db: Database, ws: MicroWS, tg: TelegramBot):
+    """WS callback: watchlist price updated. Enter if it hit entry zone."""
+    if _shutdown or price < CONFIG["ENTRY_MIN_PRICE"]:
+        return
+
+    # ws_key = "market_id_SIDE"
+    parts = ws_key.rsplit("_", 1)
+    if len(parts) != 2:
+        return
+    market_id, side = parts
+
+    spread = ws.get_spread(ws_key)
+    if spread > CONFIG["MAX_SPREAD"]:
+        return
+
+    wl = await db.get_watchlist_market(market_id)
+    if not wl:
+        return
+
+    candidate = {
+        "market_id": market_id,
+        "question": info.get("question", wl.get("question", "")),
+        "theme": wl.get("theme", "other"),
+        "side": side,
+        "price": price,
+        "best_ask": info.get("best_ask", price),
+        "days_left": wl.get("days_left", "?"),
+        "spread": spread,
+        "yes_token": wl.get("yes_token"),
+        "no_token": wl.get("no_token"),
+        "ws_token": info.get("token_id"),
+        "ws_side": "no" if side == "NO" else "yes",
+    }
+
+    entered = await try_enter(candidate, db, ws, tg, source="ws")
+    if entered:
+        log.info(f"[WS→ENTRY] {side} hit {price:.2f}¢ on '{info.get('question', '')[:40]}'")
+
+
+# ── Position Monitoring ──
+
+async def check_position_price(ws_key: str, price: float, info: dict,
                                 db: Database, ws: MicroWS, tg: TelegramBot):
-    """Called by WS when a position market price updates. Check SL/TP/resolution."""
+    """WS callback: position price updated. Check SL/resolution."""
     if _shutdown:
         return
+
+    # ws_key = "market_id_SIDE"
+    parts = ws_key.rsplit("_", 1)
+    if len(parts) != 2:
+        return
+    market_id, side = parts
 
     open_pos = await db.get_open_positions()
     pos = None
     for p in open_pos:
-        if p["market_id"] == market_id:
+        if p["market_id"] == market_id and p["side"] == side:
             pos = p
             break
 
     if not pos:
-        ws.unmark_position(market_id)
+        ws.unmark_position(ws_key)
         return
 
     entry_price = pos["entry_price"]
     stake = pos["stake_amt"]
     sl_pct = pos.get("sl_pct", CONFIG["SL_PCT"])
-    tp_pct = pos.get("tp_pct", CONFIG["TP_PCT"])
 
-    # Use bid price for realistic exit
     bid_price = info.get("best_bid", price)
     if bid_price <= 0:
         bid_price = price
@@ -231,23 +259,20 @@ async def check_position_price(market_id: str, price: float, info: dict,
     pnl_pct = (bid_price - entry_price) / entry_price
     pnl_dollar = pnl_pct * stake
 
-    # Update position price in DB (throttled — only if changed significantly)
     await db.update_position_price(pos["id"], bid_price, round(pnl_dollar, 4))
 
-    # ── Resolution detection ──
+    # ── Resolution ──
     if price >= CONFIG["RESOLUTION_PRICE"]:
-        pnl = ((1.0 - entry_price) / entry_price) * stake  # profit from resolution
+        pnl = ((1.0 - entry_price) / entry_price) * stake
         closed = await db.close_position(pos["id"], round(pnl, 4), "WIN", "resolved")
         if closed:
-            ws.unmark_position(market_id)
-            log.info(f"[RESOLVED] WIN '{pos['question'][:40]}' PnL: +${pnl:.2f}")
+            ws.unmark_position(ws_key)
+            log.info(f"[RESOLVED] WIN {side} '{pos['question'][:40]}' PnL: +${pnl:.2f}")
             await db.log_event("CLOSE_RESOLVED", market_id, {
-                "pnl": round(pnl, 4), "entry": entry_price, "exit": 1.0,
+                "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": 1.0,
             })
             await tg.send(
-                f"<b>RESOLVED WIN</b>\n"
-                f"{pos['question'][:60]}\n"
-                f"PnL: +${pnl:.2f}"
+                f"<b>RESOLVED WIN</b> {side}\n{pos['question'][:60]}\nPnL: +${pnl:.2f}"
             )
         return
 
@@ -256,42 +281,18 @@ async def check_position_price(market_id: str, price: float, info: dict,
         pnl = pnl_pct * stake
         closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "stop_loss")
         if closed:
-            ws.unmark_position(market_id)
+            ws.unmark_position(ws_key)
             log.info(
-                f"[SL] LOSS '{pos['question'][:40]}' @ {bid_price:.2f}¢ "
+                f"[SL] LOSS {side} '{pos['question'][:40]}' @ {bid_price:.2f}¢ "
                 f"PnL: ${pnl:.2f} ({pnl_pct:+.1%})"
             )
             await db.log_event("CLOSE_SL", market_id, {
-                "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
-                "pnl_pct": round(pnl_pct, 4),
+                "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
             })
             await tg.send(
-                f"<b>SL LOSS</b>\n"
-                f"{pos['question'][:60]}\n"
-                f"Entry: {entry_price:.2f}¢ → Exit: {bid_price:.2f}¢\n"
+                f"<b>SL LOSS</b> {side}\n{pos['question'][:60]}\n"
+                f"Entry: {entry_price:.2f}¢ → {bid_price:.2f}¢\n"
                 f"PnL: ${pnl:.2f} ({pnl_pct:+.1%})"
-            )
-        return
-
-    # ── Take Profit ──
-    if pnl_pct >= tp_pct:
-        pnl = pnl_pct * stake
-        closed = await db.close_position(pos["id"], round(pnl, 4), "WIN", "take_profit")
-        if closed:
-            ws.unmark_position(market_id)
-            log.info(
-                f"[TP] WIN '{pos['question'][:40]}' @ {bid_price:.2f}¢ "
-                f"PnL: +${pnl:.2f} ({pnl_pct:+.1%})"
-            )
-            await db.log_event("CLOSE_TP", market_id, {
-                "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
-                "pnl_pct": round(pnl_pct, 4),
-            })
-            await tg.send(
-                f"<b>TP WIN</b>\n"
-                f"{pos['question'][:60]}\n"
-                f"Entry: {entry_price:.2f}¢ → Exit: {bid_price:.2f}¢\n"
-                f"PnL: +${pnl:.2f} ({pnl_pct:+.1%})"
             )
         return
 
@@ -302,15 +303,14 @@ async def main():
     global _shutdown
 
     log.info("=" * 60)
-    log.info("[MAIN] quant-micro starting")
+    log.info("[MAIN] quant-micro starting (resolution harvester)")
     log.info(f"[MAIN] Simulation: {CONFIG['SIMULATION']}")
-    log.info(f"[MAIN] Watchlist zone: {CONFIG['WATCHLIST_MIN_PRICE']:.0%}-{CONFIG['WATCHLIST_MAX_PRICE']:.0%}")
-    log.info(f"[MAIN] Max stake: ${CONFIG['MAX_STAKE']}, SL: {CONFIG['SL_PCT']:.0%}, TP: {CONFIG['TP_PCT']:.0%}")
-    log.info(f"[MAIN] Dip trigger: {CONFIG['DIP_TRIGGER_PCT']:.0%}")
-    log.info(f"[MAIN] Max open: {CONFIG['MAX_OPEN']}")
+    log.info(f"[MAIN] Direct entry: ≥{CONFIG['ENTRY_MIN_PRICE']:.0%}")
+    log.info(f"[MAIN] Watchlist: {CONFIG['WATCHLIST_MIN_PRICE']:.0%}-{CONFIG['ENTRY_MIN_PRICE']:.0%}")
+    log.info(f"[MAIN] Max days: {CONFIG['MAX_DAYS_LEFT']}, ROI≥{CONFIG['MIN_ROI']:.0%}")
+    log.info(f"[MAIN] Max stake: ${CONFIG['MAX_STAKE']}, SL: 5-10% (dynamic)")
     log.info("=" * 60)
 
-    # Init services
     db = Database()
     await db.init()
 
@@ -318,15 +318,15 @@ async def main():
     scanner = MicroScanner(CONFIG)
     ws = MicroWS()
 
-    # WS callbacks — closures over db, ws, tg
-    async def on_watchlist_dip(market_id, price, info):
-        await check_dip_entry(market_id, price, info, db, ws, tg)
+    # WS callbacks
+    async def on_watchlist_price(ws_key, price, info):
+        await check_watchlist_price(ws_key, price, info, db, ws, tg)
 
-    async def on_position_price(market_id, price, info):
-        await check_position_price(market_id, price, info, db, ws, tg)
+    async def on_position_price(ws_key, price, info):
+        await check_position_price(ws_key, price, info, db, ws, tg)
 
     ws.set_callbacks(
-        on_watchlist_dip=on_watchlist_dip,
+        on_watchlist_price=on_watchlist_price,
         on_position_price=on_position_price,
     )
 
@@ -334,19 +334,25 @@ async def main():
     open_pos = await db.get_open_positions()
     for pos in open_pos:
         wl = await db.get_watchlist_market(pos["market_id"])
-        if wl and wl.get("yes_token"):
+        side = pos.get("side", "YES")
+        ws_key = f"{pos['market_id']}_{side}"
+        # Pick the right token for the side
+        if wl:
+            token_id = wl.get("yes_token") if side == "YES" else wl.get("no_token")
+        else:
+            token_id = None
+        if token_id:
             ws.register_market(
-                pos["market_id"],
-                yes_token=wl.get("yes_token"),
-                no_token=wl.get("no_token"),
-                yes_price=pos.get("entry_price", 0.9),
+                ws_key,
+                token_id=token_id,
+                token_side=side.lower(),
+                price=pos.get("entry_price", 0.9),
                 question=pos.get("question", ""),
                 is_position=True,
             )
     if open_pos:
         log.info(f"[MAIN] Restored {len(open_pos)} open positions to WS")
 
-    # Start WS in background
     ws_task = asyncio.create_task(ws.connect())
 
     await db.log_event("STARTUP", details={
@@ -357,7 +363,7 @@ async def main():
     await tg.send(
         f"<b>quant-micro started</b>\n"
         f"Mode: {'SIM' if CONFIG['SIMULATION'] else 'REAL'}\n"
-        f"Zone: {CONFIG['WATCHLIST_MIN_PRICE']:.0%}-{CONFIG['WATCHLIST_MAX_PRICE']:.0%}\n"
+        f"Entry: ≥{CONFIG['ENTRY_MIN_PRICE']:.0%} | WL: {CONFIG['WATCHLIST_MIN_PRICE']:.0%}+\n"
         f"Open: {len(open_pos)} positions"
     )
 
@@ -368,85 +374,77 @@ async def main():
     while not _shutdown:
         try:
             scan_count += 1
-            log.info(f"[SCAN #{scan_count}] Starting market scan...")
+            log.info(f"[SCAN #{scan_count}] Starting...")
 
-            # 1. Fetch watchlist candidates
-            candidates = await scanner.fetch_watchlist_candidates()
+            # 1. Fetch candidates
+            direct, watchlist = await scanner.fetch_candidates()
 
-            # 2. Update watchlist in DB + register in WS
-            new_count = 0
-            current_ids = set()
-            for c in candidates:
+            # 2. Direct entries (≥90¢)
+            entered = 0
+            for c in direct:
+                if _shutdown:
+                    break
+                if await try_enter(c, db, ws, tg, source="scan"):
+                    entered += 1
+                    await asyncio.sleep(0.5)
+
+            # 3. Watchlist (85-90¢) → register in WS for price monitoring
+            new_ws = 0
+            for c in watchlist:
                 await db.upsert_watchlist(c)
-                current_ids.add(c["market_id"])
-
-                # Reset peak to current price each scan (prevents stale peaks)
-                if c["market_id"] in ws.prices:
-                    ws.prices[c["market_id"]]["peak_price"] = c["yes_price"]
-
-                # Register in WS if not already tracked
-                if c["market_id"] not in ws.prices:
+                ws_key = f"{c['market_id']}_{c['side']}"
+                if ws_key not in ws.prices:
                     tokens = ws.register_market(
-                        c["market_id"],
-                        yes_token=c.get("yes_token"),
-                        no_token=c.get("no_token"),
-                        yes_price=c["yes_price"],
+                        ws_key,
+                        token_id=c.get("ws_token"),
+                        token_side=c.get("ws_side", c["side"].lower()),
+                        price=c["price"],
                         question=c["question"],
                         is_position=False,
                     )
                     if tokens:
                         await ws.subscribe_tokens(tokens)
-                        new_count += 1
+                        new_ws += 1
 
-            # 3. REST fallback: check open positions
+            # 4. Status
             open_pos = await db.get_open_positions()
             stats = await db.get_stats()
             bankroll = stats.get("bankroll", CONFIG["BANKROLL"])
-
-            # Calculate equity
             total_unrealized = sum(p.get("unrealized_pnl", 0) for p in open_pos)
             equity = bankroll + total_unrealized
             await db.update_peak_equity(equity)
 
             log.info(
-                f"[SCAN #{scan_count}] Watchlist: {len(candidates)} candidates, "
-                f"{new_count} new WS | Open: {len(open_pos)} | "
+                f"[SCAN #{scan_count}] Direct: {len(direct)} ({entered} entered) | "
+                f"WL: {len(watchlist)} ({new_ws} new WS) | Open: {len(open_pos)} | "
                 f"Bankroll: ${bankroll:.2f} | Equity: ${equity:.2f} | "
                 f"PnL: ${stats.get('total_pnl', 0):.2f} | "
                 f"W/L: {stats.get('wins', 0)}/{stats.get('losses', 0)}"
             )
 
-            # 4. Cleanup stale watchlist entries
+            # 5. Cleanup stale WS (every 30 scans)
             if scan_count % 30 == 0:
                 await db.cleanup_watchlist()
-
-                # Unregister WS markets that are no longer in watchlist and not positions
-                watchlist = await db.get_watchlist()
-                wl_ids = {w["market_id"] for w in watchlist}
-                pos_ids = {p["market_id"] for p in open_pos}
+                wl_data = await db.get_watchlist()
+                wl_ids = {w["market_id"] for w in wl_data}
+                pos_keys = {f"{p['market_id']}_{p['side']}" for p in open_pos}
                 to_remove = []
-                for mid in list(ws.prices.keys()):
-                    if mid not in wl_ids and mid not in pos_ids:
-                        to_remove.append(mid)
-                for mid in to_remove:
-                    tokens = ws.unregister_market(mid)
+                for ws_key in list(ws.prices.keys()):
+                    market_id = ws_key.rsplit("_", 1)[0] if "_" in ws_key else ws_key
+                    if market_id not in wl_ids and ws_key not in pos_keys:
+                        to_remove.append(ws_key)
+                for ws_key in to_remove:
+                    tokens = ws.unregister_market(ws_key)
                     await ws.unsubscribe_tokens(tokens)
                 if to_remove:
-                    log.info(f"[CLEANUP] Removed {len(to_remove)} stale WS markets")
+                    log.info(f"[CLEANUP] Removed {len(to_remove)} stale WS entries")
 
-            # 5. Log scan event
             await db.log_event("SCAN", details={
-                "scan": scan_count,
-                "watchlist": len(candidates),
-                "new_ws": new_count,
-                "open": len(open_pos),
-                "bankroll": round(bankroll, 2),
-                "equity": round(equity, 2),
-                "wins": stats.get("wins", 0),
-                "losses": stats.get("losses", 0),
+                "scan": scan_count, "direct": len(direct), "entered": entered,
+                "watchlist": len(watchlist), "new_ws": new_ws,
+                "open": len(open_pos), "bankroll": round(bankroll, 2),
             })
 
-            # Sleep until next scan
             await asyncio.sleep(CONFIG["SCAN_INTERVAL"])
 
         except Exception as e:

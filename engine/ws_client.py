@@ -12,102 +12,106 @@ WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 HEARTBEAT_INTERVAL = 10
 RECONNECT_DELAY = 5
 BATCH_SIZE = 100
-DIP_CHECK_INTERVAL = 2.0  # min seconds between dip checks per market
+WATCHLIST_CHECK_INTERVAL = 2.0
 
 
 class MicroWS:
-    """WebSocket client for watchlist dip detection + position monitoring."""
+    """WebSocket client: watchlist price-up detection + position SL/resolution.
+
+    Each tracked entry is keyed by ws_key (e.g. "market_id_YES" or "market_id_NO").
+    Subscribes to the specific token for the side we care about.
+    Prices are always from the perspective of the side we bought
+    (i.e. if we buy NO, price = 1 - yes_token_price).
+    """
 
     def __init__(self):
         self.ws = None
         self._running = False
         self._subscribed_tokens: set = set()
-        self._token_to_market: dict[str, str] = {}
-        self._token_side: dict[str, str] = {}  # token_id -> "yes" / "no"
-        self.prices: dict[str, dict] = {}  # market_id -> {yes_price, best_bid, best_ask, ...}
-        self._last_dip_check: dict[str, float] = {}  # market_id -> timestamp (throttle)
+        self._token_to_key: dict[str, str] = {}      # token_id -> ws_key
+        self._token_invert: dict[str, bool] = {}      # token_id -> True if NO side (invert price)
+        self.prices: dict[str, dict] = {}              # ws_key -> {price, best_bid, best_ask, ...}
+        self._last_watchlist_check: dict[str, float] = {}
 
-        # Callbacks
-        self._on_watchlist_dip: Optional[Callable] = None
+        self._on_watchlist_price: Optional[Callable] = None
         self._on_position_price: Optional[Callable] = None
-        self._on_disconnect: Optional[Callable] = None
-        self._on_reconnect: Optional[Callable] = None
 
-    def set_callbacks(self, on_watchlist_dip=None, on_position_price=None,
-                      on_disconnect=None, on_reconnect=None):
-        self._on_watchlist_dip = on_watchlist_dip
+    def set_callbacks(self, on_watchlist_price=None, on_position_price=None, **_):
+        self._on_watchlist_price = on_watchlist_price
         self._on_position_price = on_position_price
-        self._on_disconnect = on_disconnect
-        self._on_reconnect = on_reconnect
 
-    def register_market(self, market_id: str, yes_token: str = None,
-                        no_token: str = None, yes_price: float = 0.5,
+    def register_market(self, ws_key: str, token_id: str = None,
+                        token_side: str = "yes", price: float = 0.5,
                         question: str = "", is_position: bool = False) -> list:
-        """Register a market for WS tracking. Returns tokens to subscribe."""
+        """Register a single side for tracking. Returns tokens to subscribe."""
         tokens_to_add = []
 
-        if yes_token and yes_token not in self._subscribed_tokens:
-            self._token_to_market[yes_token] = market_id
-            self._token_side[yes_token] = "yes"
-            self._subscribed_tokens.add(yes_token)
-            tokens_to_add.append(yes_token)
+        if token_id and token_id not in self._subscribed_tokens:
+            self._token_to_key[token_id] = ws_key
+            self._token_invert[token_id] = (token_side == "no")
+            self._subscribed_tokens.add(token_id)
+            tokens_to_add.append(token_id)
 
-        if no_token and no_token not in self._subscribed_tokens:
-            self._token_to_market[no_token] = market_id
-            self._token_side[no_token] = "no"
-            self._subscribed_tokens.add(no_token)
-            tokens_to_add.append(no_token)
-
-        if market_id not in self.prices:
-            self.prices[market_id] = {
-                "yes_price": yes_price,
-                "best_bid": yes_price,  # init to yes_price so spread starts at 0 (not huge)
-                "best_ask": yes_price,
+        if ws_key not in self.prices:
+            self.prices[ws_key] = {
+                "price": price,
+                "best_bid": price,
+                "best_ask": price,
                 "question": question,
-                "yes_token": yes_token,
-                "no_token": no_token,
+                "token_id": token_id,
                 "is_position": is_position,
-                "peak_price": yes_price,
                 "last_update": time.time(),
             }
         elif is_position:
-            self.prices[market_id]["is_position"] = True
+            self.prices[ws_key]["is_position"] = True
 
         return tokens_to_add
 
-    def unregister_market(self, market_id: str) -> list:
-        """Unregister a market. Returns tokens to unsubscribe."""
+    def unregister_market(self, ws_key: str) -> list:
         tokens_to_remove = []
-        info = self.prices.pop(market_id, None)
+        info = self.prices.pop(ws_key, None)
         if not info:
             return tokens_to_remove
-
-        for token_id in [info.get("yes_token"), info.get("no_token")]:
-            if token_id and token_id in self._subscribed_tokens:
-                self._subscribed_tokens.discard(token_id)
-                self._token_to_market.pop(token_id, None)
-                self._token_side.pop(token_id, None)
-                tokens_to_remove.append(token_id)
-
+        token_id = info.get("token_id")
+        if token_id and token_id in self._subscribed_tokens:
+            self._subscribed_tokens.discard(token_id)
+            self._token_to_key.pop(token_id, None)
+            self._token_invert.pop(token_id, None)
+            tokens_to_remove.append(token_id)
         return tokens_to_remove
 
-    def mark_as_position(self, market_id: str):
-        if market_id in self.prices:
-            self.prices[market_id]["is_position"] = True
+    def mark_as_position(self, ws_key: str):
+        if ws_key in self.prices:
+            self.prices[ws_key]["is_position"] = True
 
-    def unmark_position(self, market_id: str):
-        if market_id in self.prices:
-            self.prices[market_id]["is_position"] = False
+    def unmark_position(self, ws_key: str):
+        if ws_key in self.prices:
+            self.prices[ws_key]["is_position"] = False
 
-    def get_price(self, market_id: str) -> float:
-        return self.prices.get(market_id, {}).get("yes_price", 0)
-
-    def get_bid(self, market_id: str) -> float:
-        return self.prices.get(market_id, {}).get("best_bid", 0)
-
-    def get_spread(self, market_id: str) -> float:
-        info = self.prices.get(market_id, {})
+    def get_spread(self, ws_key: str) -> float:
+        info = self.prices.get(ws_key, {})
         return info.get("best_ask", 0) - info.get("best_bid", 0)
+
+    # ── Dispatch ──
+
+    async def _dispatch(self, ws_key: str, info: dict):
+        price = info["price"]
+
+        if info.get("is_position") and self._on_position_price:
+            try:
+                await self._on_position_price(ws_key, price, info)
+            except Exception as e:
+                log.error(f"[WS] position callback error: {e}")
+        elif not info.get("is_position") and self._on_watchlist_price:
+            now = time.time()
+            last = self._last_watchlist_check.get(ws_key, 0)
+            if now - last < WATCHLIST_CHECK_INTERVAL:
+                return
+            self._last_watchlist_check[ws_key] = now
+            try:
+                await self._on_watchlist_price(ws_key, price, info)
+            except Exception as e:
+                log.error(f"[WS] watchlist callback error: {e}")
 
     # ── Connection ──
 
@@ -118,16 +122,8 @@ class MicroWS:
                 async with websockets.connect(WS_URL, ping_interval=None) as ws:
                     self.ws = ws
                     log.info(f"[WS] Connected, {len(self._subscribed_tokens)} tokens tracked")
-
-                    if self._on_reconnect:
-                        try:
-                            await self._on_reconnect()
-                        except Exception:
-                            pass
-
                     await self._subscribe_all(ws)
                     heartbeat_task = asyncio.create_task(self._heartbeat(ws))
-
                     try:
                         async for message in ws:
                             if message == "PONG":
@@ -139,15 +135,9 @@ class MicroWS:
                                 continue
                     finally:
                         heartbeat_task.cancel()
-
             except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
                 log.warning(f"[WS] Disconnected: {e}, reconnecting in {RECONNECT_DELAY}s")
                 self.ws = None
-                if self._on_disconnect:
-                    try:
-                        await self._on_disconnect()
-                    except Exception:
-                        pass
                 await asyncio.sleep(RECONNECT_DELAY)
             except Exception as e:
                 log.error(f"[WS] Unexpected error: {e}", exc_info=True)
@@ -160,7 +150,7 @@ class MicroWS:
             await self.ws.close()
             self.ws = None
 
-    # ── Subscribe / Unsubscribe ──
+    # ── Subscribe ──
 
     async def subscribe_tokens(self, token_ids: list):
         if not token_ids or not self.ws:
@@ -177,12 +167,10 @@ class MicroWS:
     async def unsubscribe_tokens(self, token_ids: list):
         if not token_ids or not self.ws:
             return
-        # Polymarket WS doesn't have explicit unsubscribe,
-        # but we stop tracking internally
         for tid in token_ids:
             self._subscribed_tokens.discard(tid)
-            self._token_to_market.pop(tid, None)
-            self._token_side.pop(tid, None)
+            self._token_to_key.pop(tid, None)
+            self._token_invert.pop(tid, None)
 
     async def _subscribe_all(self, ws):
         if not self._subscribed_tokens:
@@ -202,29 +190,6 @@ class MicroWS:
             except Exception:
                 break
 
-    # ── Dispatch ──
-
-    async def _dispatch(self, market_id: str, info: dict):
-        """Dispatch to appropriate callback with throttling for watchlist dip checks."""
-        now_price = info["yes_price"]
-
-        if info.get("is_position") and self._on_position_price:
-            try:
-                await self._on_position_price(market_id, now_price, info)
-            except Exception as e:
-                log.error(f"[WS] position callback error: {e}")
-        elif not info.get("is_position") and self._on_watchlist_dip:
-            # Throttle dip checks to avoid DB flood
-            now = time.time()
-            last = self._last_dip_check.get(market_id, 0)
-            if now - last < DIP_CHECK_INTERVAL:
-                return
-            self._last_dip_check[market_id] = now
-            try:
-                await self._on_watchlist_dip(market_id, now_price, info)
-            except Exception as e:
-                log.error(f"[WS] watchlist callback error: {e}")
-
     # ── Message Handling ──
 
     async def _handle_message(self, data):
@@ -233,95 +198,60 @@ class MicroWS:
                 if isinstance(item, dict):
                     await self._handle_message(item)
             return
-
         if not isinstance(data, dict):
             return
 
         event_type = data.get("event_type")
-        if event_type == "price_change":
-            await self._handle_price_change(data)
+        if event_type in ("price_change", "last_trade_price"):
+            await self._handle_price(data)
         elif event_type == "book":
             await self._handle_book(data)
-        elif event_type == "last_trade_price":
-            await self._handle_trade(data)
 
-    async def _handle_price_change(self, data):
+    def _to_side_price(self, token_id: str, raw_price: float) -> float:
+        """Convert raw token price to our side's price (invert if NO)."""
+        if self._token_invert.get(token_id, False):
+            return round(1.0 - raw_price, 4)
+        return raw_price
+
+    async def _handle_price(self, data):
         token_id = data.get("asset_id", "")
-        market_id = self._token_to_market.get(token_id)
-        if not market_id or market_id not in self.prices:
+        ws_key = self._token_to_key.get(token_id)
+        if not ws_key or ws_key not in self.prices:
             return
 
-        info = self.prices[market_id]
-        side = self._token_side.get(token_id, "yes")
-
-        price = float(data.get("price", 0))
-        if price <= 0:
+        raw = float(data.get("price", 0))
+        if raw <= 0:
             return
 
-        if side == "yes":
-            info["yes_price"] = price
-        else:
-            info["yes_price"] = round(1.0 - price, 4)
-
+        info = self.prices[ws_key]
+        info["price"] = self._to_side_price(token_id, raw)
         info["last_update"] = time.time()
-        now_price = info["yes_price"]
-
-        # Track peak for dip detection
-        if now_price > info.get("peak_price", 0):
-            info["peak_price"] = now_price
-
-        await self._dispatch(market_id, info)
+        await self._dispatch(ws_key, info)
 
     async def _handle_book(self, data):
         token_id = data.get("asset_id", "")
-        market_id = self._token_to_market.get(token_id)
-        if not market_id or market_id not in self.prices:
+        ws_key = self._token_to_key.get(token_id)
+        if not ws_key or ws_key not in self.prices:
             return
 
-        info = self.prices[market_id]
-        side = self._token_side.get(token_id, "yes")
+        info = self.prices[ws_key]
+        invert = self._token_invert.get(token_id, False)
 
         bids = data.get("bids", [])
         asks = data.get("asks", [])
 
-        if side == "yes":
+        if not invert:
+            # YES token: bid = our bid, ask = our ask
             if bids:
                 info["best_bid"] = float(bids[0].get("price", 0))
             if asks:
                 info["best_ask"] = float(asks[0].get("price", 0))
-        # For NO token, invert
         else:
+            # NO token: our bid = 1 - their ask, our ask = 1 - their bid
             if asks:
                 info["best_bid"] = round(1.0 - float(asks[0].get("price", 0)), 4)
             if bids:
                 info["best_ask"] = round(1.0 - float(bids[0].get("price", 0)), 4)
 
         info["last_update"] = time.time()
-
-        await self._dispatch(market_id, info)
-
-    async def _handle_trade(self, data):
-        token_id = data.get("asset_id", "")
-        market_id = self._token_to_market.get(token_id)
-        if not market_id or market_id not in self.prices:
-            return
-
-        info = self.prices[market_id]
-        side = self._token_side.get(token_id, "yes")
-
-        price = float(data.get("price", 0))
-        if price <= 0:
-            return
-
-        if side == "yes":
-            info["yes_price"] = price
-        else:
-            info["yes_price"] = round(1.0 - price, 4)
-
-        info["last_update"] = time.time()
-        now_price = info["yes_price"]
-
-        if now_price > info.get("peak_price", 0):
-            info["peak_price"] = now_price
-
-        await self._dispatch(market_id, info)
+        await self._dispatch(ws_key, info)
