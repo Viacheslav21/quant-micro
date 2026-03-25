@@ -34,6 +34,7 @@ class Database:
                     days_left    REAL DEFAULT 0,
                     end_date     TEXT,
                     roi          REAL DEFAULT 0,
+                    quality      REAL DEFAULT 0,
                     yes_token    TEXT,
                     no_token     TEXT,
                     added_at     TIMESTAMPTZ DEFAULT NOW(),
@@ -52,11 +53,12 @@ class Database:
                     unrealized_pnl REAL DEFAULT 0,
                     pnl          REAL DEFAULT 0,
                     tp_pct       REAL DEFAULT 0.05,
-                    sl_pct       REAL DEFAULT 0.10,
+                    sl_pct       REAL DEFAULT 0.05,
                     status       TEXT DEFAULT 'open',
                     result       TEXT,
                     close_reason TEXT,
-                    config_tag   TEXT DEFAULT 'micro-v1',
+                    config_tag   TEXT DEFAULT 'micro-v3',
+                    end_date     TEXT,
                     opened_at    TIMESTAMPTZ DEFAULT NOW(),
                     closed_at    TIMESTAMPTZ
                 );
@@ -93,15 +95,21 @@ class Database:
                 VALUES (1, 500)
                 ON CONFLICT (id) DO NOTHING;
             """)
-            # Migrations
+            # Migrations — add new columns
             for col, typ, default in [
                 ("days_left", "REAL", "0"),
                 ("end_date", "TEXT", "NULL"),
                 ("roi", "REAL", "0"),
+                ("quality", "REAL", "0"),
             ]:
                 await conn.execute(f"""
                     ALTER TABLE micro_watchlist ADD COLUMN IF NOT EXISTS {col} {typ} DEFAULT {default};
                 """)
+            # Add end_date to positions if missing
+            await conn.execute("""
+                ALTER TABLE micro_positions ADD COLUMN IF NOT EXISTS end_date TEXT DEFAULT NULL;
+            """)
+            # Cleanup old unused columns
             for col in ["no_price", "peak_price", "neg_risk"]:
                 await conn.execute(f"""
                     ALTER TABLE micro_watchlist DROP COLUMN IF EXISTS {col};
@@ -116,8 +124,8 @@ class Database:
                 INSERT INTO micro_watchlist
                     (market_id, question, theme, yes_price,
                      volume, liquidity, spread, best_ask,
-                     days_left, end_date, roi, yes_token, no_token)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                     days_left, end_date, roi, quality, yes_token, no_token)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                 ON CONFLICT (market_id) DO UPDATE SET
                     yes_price  = EXCLUDED.yes_price,
                     volume     = EXCLUDED.volume,
@@ -126,6 +134,7 @@ class Database:
                     best_ask   = EXCLUDED.best_ask,
                     days_left  = EXCLUDED.days_left,
                     roi        = EXCLUDED.roi,
+                    quality    = EXCLUDED.quality,
                     updated_at = NOW()
             """,
                 market["market_id"], market["question"], market.get("theme", "other"),
@@ -133,7 +142,7 @@ class Database:
                 market.get("volume", 0), market.get("liquidity", 0),
                 market.get("spread", 0), market.get("best_ask", 0),
                 market.get("days_left", 0), market.get("end_date"),
-                market.get("roi", 0),
+                market.get("roi", 0), market.get("quality", 0),
                 market.get("yes_token"), market.get("no_token"),
             )
 
@@ -164,14 +173,15 @@ class Database:
             await conn.execute("""
                 INSERT INTO micro_positions
                     (id, market_id, question, theme, side, entry_price,
-                     current_price, stake_amt, tp_pct, sl_pct, config_tag)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                     current_price, stake_amt, tp_pct, sl_pct, config_tag, end_date)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
             """,
                 pos["id"], pos["market_id"], pos["question"],
                 pos.get("theme", "other"), pos["side"], pos["entry_price"],
                 pos["entry_price"], pos["stake_amt"],
-                pos.get("tp_pct", 0.05), pos.get("sl_pct", 0.10),
-                pos.get("config_tag", "micro-v1"),
+                pos.get("tp_pct", 0.05), pos.get("sl_pct", 0.05),
+                pos.get("config_tag", "micro-v3"),
+                pos.get("end_date"),
             )
 
     async def get_open_positions(self) -> list:
@@ -263,7 +273,7 @@ class Database:
             deleted = await conn.execute("""
                 DELETE FROM micro_watchlist
                 WHERE yes_price < 0.75 OR yes_price > 0.98
-                    OR updated_at < NOW() - INTERVAL '7 days'
+                    OR updated_at < NOW() - INTERVAL '3 days'
             """)
             log.debug(f"[DB] Watchlist cleanup: {deleted}")
 
