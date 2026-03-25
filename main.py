@@ -38,20 +38,20 @@ CONFIG = {
     "SCAN_INTERVAL":      int(os.getenv("SCAN_INTERVAL", "120")),
     "MAX_STAKE":          float(os.getenv("MAX_STAKE", "5.0")),       # $5 max
     "MIN_STAKE":          float(os.getenv("MIN_STAKE", "1.0")),
-    "MAX_OPEN":           int(os.getenv("MAX_OPEN", "50")),           # focused: 50 not 150
-    "SL_PCT":             float(os.getenv("SL_PCT", "0.05")),        # tighter: 5% default
-    "ENTRY_MIN_PRICE":    float(os.getenv("ENTRY_MIN_PRICE", "0.93")), # raised: 93¢
-    "WATCHLIST_MIN_PRICE": float(os.getenv("WATCHLIST_MIN_PRICE", "0.88")), # raised: 88¢
-    "MAX_DAYS_LEFT":      float(os.getenv("MAX_DAYS_LEFT", "5")),    # 5 days — more candidates
+    "MAX_OPEN":           int(os.getenv("MAX_OPEN", "50")),
+    "SL_PCT":             float(os.getenv("SL_PCT", "0.05")),        # 5% default
+    "ENTRY_MIN_PRICE":    float(os.getenv("ENTRY_MIN_PRICE", "0.93")), # 93¢ direct entry
+    "WATCHLIST_MIN_PRICE": float(os.getenv("WATCHLIST_MIN_PRICE", "0.88")), # 88¢ watchlist
+    "MAX_DAYS_LEFT":      float(os.getenv("MAX_DAYS_LEFT", "10")),   # 10 days — parse dates from questions
     "MIN_ROI":            float(os.getenv("MIN_ROI", "0.03")),
     "MIN_LIQUIDITY_MULT": float(os.getenv("MIN_LIQUIDITY_MULT", "500")),
-    "MAX_SPREAD":         float(os.getenv("MAX_SPREAD", "0.02")),    # tighter: 2¢
+    "MAX_SPREAD":         float(os.getenv("MAX_SPREAD", "0.02")),    # 2¢ tight spread
     "RESOLUTION_PRICE":   float(os.getenv("RESOLUTION_PRICE", "0.99")),
-    "MAX_PER_THEME":      int(os.getenv("MAX_PER_THEME", "10")),     # tighter: 10 not 20
-    "CONFIG_TAG":         os.getenv("CONFIG_TAG", "micro-v3"),
-    "SCAN_PAGES":         int(os.getenv("SCAN_PAGES", "8")),         # 800 markets
-    "MIN_VOLUME":         float(os.getenv("MIN_VOLUME", "50000")),
-    "MIN_QUALITY_SCORE":  float(os.getenv("MIN_QUALITY_SCORE", "30")),
+    "MAX_PER_THEME":      int(os.getenv("MAX_PER_THEME", "10")),
+    "CONFIG_TAG":         os.getenv("CONFIG_TAG", "micro-v4"),
+    "SCAN_PAGES":         int(os.getenv("SCAN_PAGES", "16")),        # 1600 markets
+    "MIN_VOLUME":         float(os.getenv("MIN_VOLUME", "50000")),   # 50k volume
+    "MIN_QUALITY_SCORE":  float(os.getenv("MIN_QUALITY_SCORE", "35")), # quality gate
     "TIME_EXIT_HOURS":    float(os.getenv("TIME_EXIT_HOURS", "4")),  # exit if losing <4h before expiry
 }
 
