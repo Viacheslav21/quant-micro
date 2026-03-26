@@ -24,7 +24,10 @@ THEME_KEYWORDS = {
                     "chatgpt", "gemini", "released", "launch"],
     "sports":      ["nba", "nfl", "mlb", "ufc", "premier league", "champions league", "world cup",
                     "ncaa", "tournament", "match", "game ", "score", "winner", "playoff",
-                    "real madrid", "barcelona", "lakers", "celtics"],
+                    "real madrid", "barcelona", "lakers", "celtics",
+                    "northern ireland", "republic of ireland", "scotland", "wales", "england ",
+                    "nations league", "euro 2", "world cup qualif", "friendly match",
+                    "fifa", "uefa", "concacaf", "conmebol"],
     "esports":     ["esports", "counter-strike", "dota", "league of legends", "valorant",
                     "semperfi", "fnatic", "navi", "faze", " vs ", "mongolz", "blast open"],
     "geopolitics": ["russia", "ukraine", "china", "taiwan", "sanctions", "pakistan", "afghanistan",
@@ -48,6 +51,7 @@ _RISKY_PATTERNS = [
     re.compile(r"(price|market cap|fdv|mcap)", re.I),                       # price-related nouns
     # Sports/competition
     re.compile(r"will .+ (beat|defeat|win against|lose to)", re.I),
+    re.compile(r"will .+ win\s+(on|in|at|against|the|their)\b", re.I),  # "will X win on [date]", "will X win the match"
     re.compile(r" vs\.? ", re.I),
     re.compile(r"(score|goals?|points?) (over|under)", re.I),
     # Counting/threshold/range — "90 million or more", "80 ships", "be 7°C"
