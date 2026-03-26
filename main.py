@@ -47,7 +47,7 @@ CONFIG = {
     "MIN_LIQUIDITY_MULT": float(os.getenv("MIN_LIQUIDITY_MULT", "500")),
     "MAX_SPREAD":         float(os.getenv("MAX_SPREAD", "0.02")),    # 2¢ tight spread
     "RESOLUTION_PRICE":   float(os.getenv("RESOLUTION_PRICE", "0.99")),
-    "MAX_PER_THEME":      int(os.getenv("MAX_PER_THEME", "10")),
+    "MAX_PER_THEME":      int(os.getenv("MAX_PER_THEME", "5")),     # limit correlated risk
     "CONFIG_TAG":         os.getenv("CONFIG_TAG", "micro-v4"),
     "SCAN_PAGES":         int(os.getenv("SCAN_PAGES", "16")),        # 1600 markets
     "MIN_VOLUME":         float(os.getenv("MIN_VOLUME", "50000")),   # 50k volume

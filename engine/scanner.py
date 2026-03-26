@@ -50,14 +50,23 @@ _RISKY_PATTERNS = [
     re.compile(r"will .+ (beat|defeat|win against|lose to)", re.I),
     re.compile(r" vs\.? ", re.I),
     re.compile(r"(score|goals?|points?) (over|under)", re.I),
-    # Counting/mention/range markets — exact number bets gap to 0 on resolution
+    # Counting/threshold/range — "90 million or more", "80 ships", "be 7°C"
     re.compile(r"(post|tweet|send|write|publish)\s+\d+[\s-]+\d+", re.I),
     re.compile(r"\d+[\s-]+\d+\s+(tweets?|posts?|times?|mentions?)", re.I),
     re.compile(r"\b\d+-\d+\b.*\b(tweets?|posts?|goals?|points?|runs?|yards?)\b", re.I),
     re.compile(r"(exactly|between)\s+\d+", re.I),
-    re.compile(r"(more|fewer|less) than \d+ (tweets?|posts?|times?)", re.I),
+    re.compile(r"(more|fewer|less) than \d+", re.I),                        # "more than 5"
+    re.compile(r"\d+[\w\s]*(or more|or less|or fewer|\+)", re.I),           # "90 million or more", "80+"
+    re.compile(r"(get|have|receive|reach)\s+\d+", re.I),                    # "get 90 million views"
     re.compile(r"how many", re.I),
     re.compile(r"(mention|say|use the word)", re.I),
+    # Weather / temperature / measurement bets — unpredictable
+    re.compile(r"(temperature|°[CF]|degrees|celsius|fahrenheit|weather|rainfall|wind speed)", re.I),
+    re.compile(r"(highest|lowest|average|max|min)\s+(temperature|temp|wind|rain)", re.I),
+    # Exact number bets — "be 7°C", "be exactly", "end at"
+    re.compile(r"\bbe\s+\d+", re.I),                                        # "be 7°C", "be 100"
+    # Ships/transit/counting physical events
+    re.compile(r"\d+\s+(ships?|vessels?|flights?|trains?|trucks?)\s+(transit|cross|pass)", re.I),
 ]
 
 # --- Date parsing from question text ---
