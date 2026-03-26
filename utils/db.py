@@ -1,3 +1,4 @@
+import json
 import os
 import time
 import logging
@@ -86,6 +87,8 @@ class Database:
                     ON micro_positions(status);
                 CREATE INDEX IF NOT EXISTS idx_micro_pos_market
                     ON micro_positions(market_id);
+                CREATE INDEX IF NOT EXISTS idx_micro_pos_market_side_status
+                    ON micro_positions(market_id, side, status);
                 CREATE INDEX IF NOT EXISTS idx_micro_log_type
                     ON micro_log(event_type, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_micro_watchlist_price
@@ -184,6 +187,37 @@ class Database:
                 pos.get("end_date"),
             )
 
+    async def save_position_and_deduct(self, pos: dict, stake: float):
+        """Save position + deduct stake atomically in one transaction."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("""
+                    INSERT INTO micro_positions
+                        (id, market_id, question, theme, side, entry_price,
+                         current_price, stake_amt, tp_pct, sl_pct, config_tag, end_date)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                """,
+                    pos["id"], pos["market_id"], pos["question"],
+                    pos.get("theme", "other"), pos["side"], pos["entry_price"],
+                    pos["entry_price"], pos["stake_amt"],
+                    pos.get("tp_pct", 0.05), pos.get("sl_pct", 0.05),
+                    pos.get("config_tag", "micro-v3"),
+                    pos.get("end_date"),
+                )
+                await conn.execute(
+                    "UPDATE micro_stats SET bankroll = bankroll - $1, updated_at = NOW() WHERE id = 1",
+                    stake,
+                )
+
+    async def get_open_position_by_market(self, market_id: str, side: str) -> Optional[dict]:
+        """Fast single-position lookup for WS callbacks (avoids full table scan)."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM micro_positions WHERE market_id = $1 AND side = $2 AND status = 'open'",
+                market_id, side,
+            )
+            return dict(row) if row else None
+
     async def get_open_positions(self) -> list:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
@@ -192,29 +226,31 @@ class Database:
             return [dict(r) for r in rows]
 
     async def close_position(self, pos_id: str, pnl: float, result: str, reason: str) -> bool:
-        """Atomic close with race protection. Returns stake + pnl to bankroll."""
+        """Atomic close with race protection. Returns stake + pnl to bankroll.
+        Wrapped in a transaction so position close + bankroll update are all-or-nothing."""
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("""
-                UPDATE micro_positions
-                SET status = 'closed', pnl = $2, result = $3, close_reason = $4,
-                    closed_at = NOW()
-                WHERE id = $1 AND status = 'open'
-                RETURNING id, stake_amt
-            """, pos_id, pnl, result, reason)
-            if row:
-                stake = row["stake_amt"]
-                await conn.execute("""
-                    UPDATE micro_stats SET
-                        bankroll     = bankroll + $1 + $2,
-                        total_pnl    = total_pnl + $2,
-                        wins         = wins + CASE WHEN $3 = 'WIN' THEN 1 ELSE 0 END,
-                        losses       = losses + CASE WHEN $3 = 'LOSS' THEN 1 ELSE 0 END,
-                        total_trades = total_trades + 1,
-                        updated_at   = NOW()
-                    WHERE id = 1
-                """, stake, pnl, result)
-                return True
-            return False
+            async with conn.transaction():
+                row = await conn.fetchrow("""
+                    UPDATE micro_positions
+                    SET status = 'closed', pnl = $2, result = $3, close_reason = $4,
+                        closed_at = NOW()
+                    WHERE id = $1 AND status = 'open'
+                    RETURNING id, stake_amt
+                """, pos_id, pnl, result, reason)
+                if row:
+                    stake = row["stake_amt"]
+                    await conn.execute("""
+                        UPDATE micro_stats SET
+                            bankroll     = bankroll + $1 + $2,
+                            total_pnl    = total_pnl + $2,
+                            wins         = wins + CASE WHEN $3 = 'WIN' THEN 1 ELSE 0 END,
+                            losses       = losses + CASE WHEN $3 = 'LOSS' THEN 1 ELSE 0 END,
+                            total_trades = total_trades + 1,
+                            updated_at   = NOW()
+                        WHERE id = 1
+                    """, stake, pnl, result)
+                    return True
+                return False
 
     async def update_position_price(self, pos_id: str, price: float, unrealized_pnl: float):
         async with self.pool.acquire() as conn:
@@ -274,7 +310,7 @@ class Database:
             async with self.pool.acquire() as conn:
                 await conn.execute(
                     "INSERT INTO micro_log (event_type, market_id, details) VALUES ($1, $2, $3)",
-                    event_type, market_id, __import__("json").dumps(details or {}),
+                    event_type, market_id, json.dumps(details or {}),
                 )
         except Exception as e:
             log.warning(f"[DB] log_event failed: {e}")
@@ -302,6 +338,23 @@ class Database:
                 row = await conn.fetchrow(
                     "SELECT 1 FROM micro_positions WHERE market_id = $1 AND status = 'open'",
                     market_id,
+                )
+            return row is not None
+
+    async def has_recent_close(self, market_id: str, side: str = None, hours: float = 6) -> bool:
+        """Check if a position on this market was closed recently (prevents re-entry loops)."""
+        async with self.pool.acquire() as conn:
+            if side:
+                row = await conn.fetchrow(
+                    "SELECT 1 FROM micro_positions WHERE market_id = $1 AND side = $2 "
+                    "AND status = 'closed' AND closed_at > NOW() - INTERVAL '1 hour' * $3",
+                    market_id, side, hours,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT 1 FROM micro_positions WHERE market_id = $1 "
+                    "AND status = 'closed' AND closed_at > NOW() - INTERVAL '1 hour' * $3",
+                    market_id, hours,
                 )
             return row is not None
 

@@ -16,9 +16,11 @@ import asyncio
 import logging
 import os
 import signal
+import json
 import time
 from datetime import datetime, timezone
 
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -72,6 +74,7 @@ log = logging.getLogger("micro")
 
 _shutdown = False
 _last_stake_warn = 0.0  # throttle "stake too small" warnings
+_http_client: httpx.AsyncClient | None = None
 
 
 def _handle_signal(sig, frame):
@@ -89,8 +92,10 @@ signal.signal(signal.SIGINT, _handle_signal)
 async def _verify_price_rest(market_id: str, side: str) -> float | None:
     """Fetch current mid-price from Gamma REST API to confirm WS price.
     Returns the side's price or None on failure."""
+    if not _http_client:
+        return None
     try:
-        r = await scanner.client.get(
+        r = await _http_client.get(
             f"https://gamma-api.polymarket.com/markets/{market_id}",
             timeout=5,
         )
@@ -100,9 +105,8 @@ async def _verify_price_rest(market_id: str, side: str) -> float | None:
         raw = m.get("outcomePrices")
         if not raw:
             return None
-        import json as _j
         if isinstance(raw, str):
-            raw = _j.loads(raw)
+            raw = json.loads(raw)
         yes_p = float(raw[0])
         return round(1.0 - yes_p, 4) if side == "NO" else round(yes_p, 4)
     except Exception as e:
@@ -139,6 +143,10 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         return False
 
     if await db.has_position_on_market(market_id, side):
+        return False
+
+    # Cooldown: don't re-enter markets recently closed (prevents TIME EXIT → re-entry loop)
+    if await db.has_recent_close(market_id, side, hours=6):
         return False
 
     open_pos = await db.get_open_positions()
@@ -199,8 +207,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         "end_date": candidate.get("end_date"),
     }
 
-    await db.save_position(pos)
-    await db.deduct_stake(stake)
+    await db.save_position_and_deduct(pos, stake)
 
     await db.upsert_watchlist(candidate)
 
@@ -265,6 +272,17 @@ async def check_watchlist_price(ws_key: str, price: float, info: dict,
     if not wl:
         return
 
+    # Recalculate days_left from end_date (watchlist value may be stale)
+    end_date_str = wl.get("end_date")
+    if end_date_str:
+        try:
+            end_dt = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
+            days_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 86400
+        except Exception:
+            days_left = wl.get("days_left", 0)
+    else:
+        days_left = wl.get("days_left", 0)
+
     candidate = {
         "market_id": market_id,
         "question": info.get("question", wl.get("question", "")),
@@ -272,7 +290,7 @@ async def check_watchlist_price(ws_key: str, price: float, info: dict,
         "side": side,
         "price": price,
         "best_ask": info.get("best_ask", price),
-        "days_left": wl.get("days_left", "?"),
+        "days_left": days_left,
         "spread": spread,
         "quality": wl.get("quality", wl.get("roi", 0) * 500),  # estimate if not stored
         "yes_token": wl.get("yes_token"),
@@ -301,12 +319,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         return
     market_id, side = parts
 
-    open_pos = await db.get_open_positions()
-    pos = None
-    for p in open_pos:
-        if p["market_id"] == market_id and p["side"] == side:
-            pos = p
-            break
+    pos = await db.get_open_position_by_market(market_id, side)
 
     if not pos:
         ws.unmark_position(ws_key)
@@ -334,15 +347,15 @@ async def check_position_price(ws_key: str, price: float, info: dict,
 
     await db.update_position_price(pos["id"], bid_price, round(pnl_dollar, 4))
 
-    # ── Resolution WIN: our side price → 99¢+ ──
-    if price >= CONFIG["RESOLUTION_PRICE"]:
-        pnl = ((1.0 - entry_price) / entry_price) * stake
+    # ── Resolution WIN: our side price → 99¢+ (use bid for real exit price) ──
+    if bid_price >= CONFIG["RESOLUTION_PRICE"]:
+        pnl = ((bid_price - entry_price) / entry_price) * stake
         closed = await db.close_position(pos["id"], round(pnl, 4), "WIN", "resolved")
         if closed:
             ws.unmark_position(ws_key)
             log.info(f"[RESOLVED] WIN {side} '{pos['question'][:40]}' PnL: +${pnl:.2f}")
             await db.log_event("CLOSE_RESOLVED", market_id, {
-                "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": 1.0,
+                "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
             })
             await tg.send(
                 f"<b>RESOLVED WIN</b> {side}\n{pos['question'][:60]}\nPnL: +${pnl:.2f}"
@@ -435,6 +448,13 @@ async def check_time_exits(db: Database, ws: MicroWS, tg: TelegramBot):
         if current_price >= entry_price:
             continue  # in profit or flat, let it ride to resolution
 
+        # Verify via REST — WS price might be stale
+        rest_price = await _verify_price_rest(pos["market_id"], pos["side"])
+        if rest_price is not None:
+            if rest_price >= entry_price:
+                continue  # REST says we're in profit, skip time exit
+            current_price = rest_price  # use fresher REST price for PnL
+
         pnl_pct = (current_price - entry_price) / entry_price
         pnl = pnl_pct * pos["stake_amt"]
 
@@ -461,7 +481,7 @@ async def check_time_exits(db: Database, ws: MicroWS, tg: TelegramBot):
 # ── Main Loop ──
 
 async def main():
-    global _shutdown
+    global _shutdown, _http_client
 
     log.info("=" * 60)
     log.info("[MAIN] quant-micro v3 (resolution harvester)")
@@ -486,6 +506,7 @@ async def main():
 
     tg = TelegramBot(CONFIG["TELEGRAM_TOKEN"], CONFIG["TELEGRAM_CHAT_ID"])
     scanner = MicroScanner(CONFIG)
+    _http_client = scanner.client
     ws = MicroWS()
 
     # WS callbacks
@@ -515,13 +536,12 @@ async def main():
         # If no token in watchlist, fetch from API
         if not token_id:
             try:
-                import json as _json
                 r = await scanner.client.get(f"https://gamma-api.polymarket.com/markets/{pos['market_id']}")
                 if r.status_code == 200:
                     mdata = r.json()
                     tids = mdata.get("clobTokenIds") or []
                     if isinstance(tids, str):
-                        tids = _json.loads(tids)
+                        tids = json.loads(tids)
                     token_id = tids[0] if tids else None  # YES token
                     if token_id:
                         log.info(f"[RESTORE] Fetched YES token for {pos['market_id'][:8]} from API")
@@ -653,6 +673,7 @@ async def main():
     await db.log_event("SHUTDOWN")
     await ws.stop()
     ws_task.cancel()
+    _http_client = None
     await scanner.close()
     await tg.send("<b>quant-micro stopped</b>")
     await tg.close()

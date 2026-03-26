@@ -43,7 +43,7 @@ RISKY_THEMES = {"sports", "esports"}
 _RISKY_PATTERNS = [
     # Price bets — any mention of $ amounts or price thresholds
     re.compile(r"\$[\d,]+", re.I),                                          # any dollar amount ($78,000)
-    re.compile(r"(above|below|over|under|between|reach|hit|dip|touch)\s", re.I),  # price direction words
+    re.compile(r"(above|below|over|under|reach|hit|dip|touch)\s+\$?[\d,]+", re.I),  # price direction + number
     re.compile(r"(up or down|higher or lower|green or red)", re.I),         # binary price direction
     re.compile(r"(price|market cap|fdv|mcap)", re.I),                       # price-related nouns
     # Sports/competition
@@ -57,7 +57,7 @@ _RISKY_PATTERNS = [
     re.compile(r"(exactly|between)\s+\d+", re.I),
     re.compile(r"(more|fewer|less) than \d+", re.I),                        # "more than 5"
     re.compile(r"\d+[\w\s]*(or more|or less|or fewer|\+)", re.I),           # "90 million or more", "80+"
-    re.compile(r"(get|have|receive|reach)\s+\d+", re.I),                    # "get 90 million views"
+    re.compile(r"(get|have|receive|reach)\s+\d{2,}", re.I),                  # "get 90 million views" (2+ digit numbers)
     re.compile(r"how many", re.I),
     re.compile(r"(mention|say|use the word)", re.I),
     # Weather / temperature / measurement bets — unpredictable
@@ -81,7 +81,7 @@ _DATE_PATTERNS = [
     # "by March 31" / "on March 25" / "before April 15"
     re.compile(r"(?:by|on|before)\s+(\w+)\s+(\d{1,2})", re.I),
     # "March 31, 2026"
-    re.compile(r"(\w+)\s+(\d{1,2})\s*,?\s*202[5-7]", re.I),
+    re.compile(r"(\w+)\s+(\d{1,2})\s*,?\s*20\d{2}", re.I),
     # "in March" → end of month
     re.compile(r"in\s+(\w+)\s*\??$", re.I),
 ]
@@ -103,11 +103,11 @@ def _parse_date_from_question(question: str):
         if pat == _DATE_PATTERNS[2]:
             # "in March" → last day of month
             import calendar
-            day = calendar.monthrange(2026, month)[1]
+            day = calendar.monthrange(datetime.now(timezone.utc).year, month)[1]
         else:
             day = int(m.group(2))
         try:
-            return datetime(2026, month, day, 23, 59, tzinfo=timezone.utc)
+            return datetime(datetime.now(timezone.utc).year, month, day, 23, 59, tzinfo=timezone.utc)
         except (ValueError, OverflowError):
             continue
 
@@ -119,7 +119,7 @@ def _parse_date_from_question(question: str):
         day = int(m.group(2))
         if month:
             try:
-                return datetime(2026, month, day, 23, 59, tzinfo=timezone.utc)
+                return datetime(datetime.now(timezone.utc).year, month, day, 23, 59, tzinfo=timezone.utc)
             except (ValueError, OverflowError):
                 pass
 
@@ -249,11 +249,7 @@ class MicroScanner:
                 if isinstance(r, Exception):
                     continue
                 batch = r.json() or []
-                if not batch:
-                    break
                 all_markets.extend(batch)
-                if len(batch) < 100:
-                    break
 
             for m in all_markets:
                 vol = float(m.get("volume") or 0)

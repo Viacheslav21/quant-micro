@@ -116,10 +116,12 @@ class MicroWS:
 
     async def connect(self):
         self._running = True
+        reconnect_attempts = 0
         while self._running:
             try:
                 async with websockets.connect(WS_URL, ping_interval=None) as ws:
                     self.ws = ws
+                    reconnect_attempts = 0
                     log.info(f"[WS] Connected, {len(self._subscribed_tokens)} tokens tracked")
                     await self._subscribe_all(ws)
                     heartbeat_task = asyncio.create_task(self._heartbeat(ws))
@@ -135,13 +137,17 @@ class MicroWS:
                     finally:
                         heartbeat_task.cancel()
             except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
-                log.warning(f"[WS] Disconnected: {e}, reconnecting in {RECONNECT_DELAY}s")
+                delay = min(RECONNECT_DELAY * (2 ** min(reconnect_attempts, 4)), 60)
+                reconnect_attempts += 1
+                log.warning(f"[WS] Disconnected: {e}, reconnecting in {delay}s")
                 self.ws = None
-                await asyncio.sleep(RECONNECT_DELAY)
+                await asyncio.sleep(delay)
             except Exception as e:
+                delay = min(RECONNECT_DELAY * (2 ** min(reconnect_attempts, 4)), 60)
+                reconnect_attempts += 1
                 log.error(f"[WS] Unexpected error: {e}", exc_info=True)
                 self.ws = None
-                await asyncio.sleep(RECONNECT_DELAY)
+                await asyncio.sleep(delay)
 
     async def stop(self):
         self._running = False
