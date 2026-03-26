@@ -84,6 +84,32 @@ signal.signal(signal.SIGTERM, _handle_signal)
 signal.signal(signal.SIGINT, _handle_signal)
 
 
+# ── REST Price Verification ──
+
+async def _verify_price_rest(market_id: str, side: str) -> float | None:
+    """Fetch current mid-price from Gamma REST API to confirm WS price.
+    Returns the side's price or None on failure."""
+    try:
+        r = await scanner.client.get(
+            f"https://gamma-api.polymarket.com/markets/{market_id}",
+            timeout=5,
+        )
+        if r.status_code != 200:
+            return None
+        m = r.json()
+        raw = m.get("outcomePrices")
+        if not raw:
+            return None
+        import json as _j
+        if isinstance(raw, str):
+            raw = _j.loads(raw)
+        yes_p = float(raw[0])
+        return round(1.0 - yes_p, 4) if side == "NO" else round(yes_p, 4)
+    except Exception as e:
+        log.warning(f"[REST] Price verify failed for {market_id[:8]}: {e}")
+        return None
+
+
 # ── Stake Calculation ──
 
 def calc_stake(bankroll: float) -> float:
@@ -325,6 +351,16 @@ async def check_position_price(ws_key: str, price: float, info: dict,
 
     # ── Stop Loss ──
     if pnl_pct <= -sl_pct:
+        # Verify via REST before closing — WS book can be stale/incomplete
+        rest_price = await _verify_price_rest(market_id, side)
+        if rest_price is not None:
+            rest_pnl_pct = (rest_price - entry_price) / entry_price
+            if rest_pnl_pct > -sl_pct:
+                log.info(
+                    f"[SL BLOCKED] {market_id[:8]} {side} WS bid={bid_price:.4f} but REST={rest_price:.4f} "
+                    f"(WS pnl={pnl_pct:+.1%}, REST pnl={rest_pnl_pct:+.1%}) — not a real SL"
+                )
+                return
         pnl = pnl_pct * stake
         closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "stop_loss")
         if closed:
@@ -332,6 +368,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             log.info(
                 f"[SL] LOSS {side} '{pos['question'][:40]}' @ {bid_price:.2f}¢ "
                 f"PnL: ${pnl:.2f} ({pnl_pct:+.1%})"
+                f"{f' (REST confirmed: {rest_price:.4f})' if rest_price else ' (REST unavailable)'}"
             )
             await db.log_event("CLOSE_SL", market_id, {
                 "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
@@ -344,8 +381,14 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         return
 
     # ── Rapid Drop Guard ──
-    # If price dropped >5¢ from entry, exit immediately (something went wrong)
     if bid_price < entry_price - 0.05:
+        # Verify via REST before closing
+        rest_price = await _verify_price_rest(market_id, side)
+        if rest_price is not None and rest_price >= entry_price - 0.05:
+            log.info(
+                f"[RAPID DROP BLOCKED] {market_id[:8]} {side} WS bid={bid_price:.4f} but REST={rest_price:.4f} — not a real drop"
+            )
+            return
         pnl = pnl_pct * stake
         closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "rapid_drop")
         if closed:
