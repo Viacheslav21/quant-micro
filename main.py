@@ -114,6 +114,34 @@ async def _verify_price_rest(market_id: str, side: str) -> float | None:
         return None
 
 
+async def _check_volume_confirms(market_id: str) -> bool:
+    """Check if recent volume supports a real price move (not noise).
+    Returns True if volume is elevated (move is real), False if low volume (likely noise)."""
+    if not _http_client:
+        return True  # can't check, assume real
+    try:
+        r = await _http_client.get(
+            f"https://gamma-api.polymarket.com/markets/{market_id}",
+            timeout=5,
+        )
+        if r.status_code != 200:
+            return True
+        m = r.json()
+        vol_24h = float(m.get("volume24hr") or 0)
+        vol_total = float(m.get("volume") or 0)
+
+        # Estimate average daily volume (total / age, rough)
+        # If 24h volume is < 30% of what we'd expect, it's a low-volume drop
+        if vol_total > 0 and vol_24h > 0:
+            # Simple heuristic: if 24h volume < $5k, it's thin/noise
+            if vol_24h < 5000:
+                log.info(f"[VOL CHECK] {market_id[:8]} vol_24h=${vol_24h:.0f} — low volume, likely noise")
+                return False
+        return True
+    except Exception:
+        return True  # can't check, assume real
+
+
 # ── Stake Calculation ──
 
 def calc_stake(bankroll: float) -> float:
@@ -145,6 +173,14 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     if await db.has_position_on_market(market_id, side):
         return False
 
+    # Theme auto-block: Bayesian calibration blocks themes with WR < 40% after 10+ trades
+    if await db.is_theme_blocked(theme):
+        return False
+
+    # Blacklist: never re-enter a market that hit SL or rapid drop
+    if await db.has_sl_loss(market_id, side):
+        return False
+
     # Cooldown: don't re-enter markets recently closed (prevents TIME EXIT → re-entry loop)
     if await db.has_recent_close(market_id, side, hours=6):
         return False
@@ -160,6 +196,33 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     stats = await db.get_stats()
     bankroll = stats.get("bankroll", CONFIG["BANKROLL"])
     stake = calc_stake(bankroll)
+
+    # ── Correlation penalty: limit effective exposure per theme cluster ──
+    if theme_count > 0:
+        THEME_RHO = 0.5
+        theme_stake = sum(p.get("stake_amt", 0) for p in open_pos if p.get("theme") == theme)
+        n = theme_count
+        effective_n = n / (1 + (n - 1) * THEME_RHO)
+        stake_per_eff = theme_stake / effective_n if effective_n > 0 else theme_stake
+        max_allowed = bankroll * 0.05  # max 5% bankroll per effective independent bet
+
+        if stake_per_eff >= max_allowed:
+            log.debug(
+                f"[CORR] Theme '{theme}': {n} pos, ${theme_stake:.0f} staked, "
+                f"eff={effective_n:.1f}, per_eff=${stake_per_eff:.1f} ≥ max ${max_allowed:.1f} — skip"
+            )
+            return False
+
+        # Worst-case check: if all theme positions + new one hit SL simultaneously
+        sl_pct_est = 0.08  # approximate average SL
+        worst_case = (theme_stake + stake) * sl_pct_est
+        max_loss = bankroll * 0.15  # max 15% bankroll loss from one theme cluster
+        if worst_case > max_loss:
+            log.debug(
+                f"[CORR] Theme '{theme}': worst-case SL -${worst_case:.1f} > "
+                f"15% bankroll ${max_loss:.1f} — skip"
+            )
+            return False
 
     if stake < CONFIG["MIN_STAKE"]:
         now = time.time()
@@ -181,16 +244,17 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     if quality < CONFIG["MIN_QUALITY_SCORE"]:
         return False
 
-    # ── Dynamic SL: tighter for longer-dated, very tight overall ──
+    # ── Dynamic SL: wide enough to survive normal fluctuations ──
+    # Audit showed 0% WR on SL exits — old 3% was too tight, killed positions before resolution
     days_left = candidate.get("days_left", 0)
     if days_left <= 0.5:
-        sl_pct = 0.07  # 7% — resolves very soon, hold tighter
+        sl_pct = 0.10  # 10% — resolves very soon, let it ride
     elif days_left <= 1:
-        sl_pct = 0.05  # 5%
+        sl_pct = 0.09  # 9%
     elif days_left <= 2:
-        sl_pct = 0.04  # 4% — 1-2 days
+        sl_pct = 0.08  # 8%
     else:
-        sl_pct = 0.03  # 3% — 2-5 days, cut losses fast
+        sl_pct = 0.07  # 7% — 2+ days, still give room
 
     # ── Execute ──
     pos_id = f"mic_{market_id[:8]}_{int(time.time())}"
@@ -353,6 +417,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         closed = await db.close_position(pos["id"], round(pnl, 4), "WIN", "resolved")
         if closed:
             ws.unmark_position(ws_key)
+            await db.recalibrate_theme(pos.get("theme", "other"))
             log.info(f"[RESOLVED] WIN {side} '{pos['question'][:40]}' PnL: +${pnl:.2f}")
             await db.log_event("CLOSE_RESOLVED", market_id, {
                 "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
@@ -374,10 +439,18 @@ async def check_position_price(ws_key: str, price: float, info: dict,
                     f"(WS pnl={pnl_pct:+.1%}, REST pnl={rest_pnl_pct:+.1%}) — not a real SL"
                 )
                 return
+        # Volume confirmation: skip SL if drop is on low volume (likely noise)
+        vol_confirms = await _check_volume_confirms(market_id)
+        if not vol_confirms:
+            log.info(
+                f"[SL VOL BLOCKED] {market_id[:8]} {side} pnl={pnl_pct:+.1%} but low volume — skipping SL"
+            )
+            return
         pnl = pnl_pct * stake
         closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "stop_loss")
         if closed:
             ws.unmark_position(ws_key)
+            await db.recalibrate_theme(pos.get("theme", "other"))
             log.info(
                 f"[SL] LOSS {side} '{pos['question'][:40]}' @ {bid_price:.2f}¢ "
                 f"PnL: ${pnl:.2f} ({pnl_pct:+.1%})"
@@ -393,11 +466,11 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             )
         return
 
-    # ── Rapid Drop Guard ──
-    if bid_price < entry_price - 0.05:
+    # ── Rapid Drop Guard (7¢ — wider to survive normal fluctuations) ──
+    if bid_price < entry_price - 0.07:
         # Verify via REST before closing
         rest_price = await _verify_price_rest(market_id, side)
-        if rest_price is not None and rest_price >= entry_price - 0.05:
+        if rest_price is not None and rest_price >= entry_price - 0.07:
             log.info(
                 f"[RAPID DROP BLOCKED] {market_id[:8]} {side} WS bid={bid_price:.4f} but REST={rest_price:.4f} — not a real drop"
             )
@@ -406,6 +479,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "rapid_drop")
         if closed:
             ws.unmark_position(ws_key)
+            await db.recalibrate_theme(pos.get("theme", "other"))
             log.info(
                 f"[RAPID DROP] LOSS {side} '{pos['question'][:40]}' @ {bid_price:.2f}¢ "
                 f"PnL: ${pnl:.2f} ({pnl_pct:+.1%})"
@@ -422,6 +496,56 @@ async def check_position_price(ws_key: str, price: float, info: dict,
 
 
 # ── Time-based Exit Check ──
+
+async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
+    """Force-close positions whose end_date has passed (stuck/unresolved)."""
+    open_pos = await db.get_open_positions()
+    now = datetime.now(timezone.utc)
+
+    for pos in open_pos:
+        end_date_str = pos.get("end_date")
+        if not end_date_str:
+            continue
+        try:
+            end = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
+        except Exception:
+            continue
+
+        hours_past = (now - end).total_seconds() / 3600
+        if hours_past < 24:
+            continue  # give 24h grace period for delayed resolution
+
+        # Position is 24h+ past expiry — force close
+        entry_price = pos["entry_price"]
+        current_price = pos.get("current_price", entry_price)
+
+        rest_price = await _verify_price_rest(pos["market_id"], pos["side"])
+        if rest_price is not None:
+            current_price = rest_price
+
+        pnl_pct = (current_price - entry_price) / entry_price
+        pnl = pnl_pct * pos["stake_amt"]
+        result = "WIN" if pnl >= 0 else "LOSS"
+
+        closed = await db.close_position(pos["id"], round(pnl, 4), result, "expired")
+        if closed:
+            side = pos["side"]
+            ws_key = f"{pos['market_id']}_{side}"
+            ws.unmark_position(ws_key)
+            await db.recalibrate_theme(pos.get("theme", "other"))
+            log.info(
+                f"[EXPIRED] {result} {side} '{pos['question'][:40]}' "
+                f"PnL: ${pnl:.2f} | {hours_past:.0f}h past expiry"
+            )
+            await db.log_event("CLOSE_EXPIRED", pos["market_id"], {
+                "side": side, "pnl": round(pnl, 4), "entry": entry_price,
+                "exit": current_price, "hours_past_expiry": round(hours_past, 1),
+            })
+            await tg.send(
+                f"<b>EXPIRED {result}</b> {side}\n{pos['question'][:60]}\n"
+                f"PnL: ${pnl:.2f} | {hours_past:.0f}h past expiry"
+            )
+
 
 async def check_time_exits(db: Database, ws: MicroWS, tg: TelegramBot):
     """Close positions that are losing with <TIME_EXIT_HOURS hours until resolution."""
@@ -463,6 +587,7 @@ async def check_time_exits(db: Database, ws: MicroWS, tg: TelegramBot):
             side = pos["side"]
             ws_key = f"{pos['market_id']}_{side}"
             ws.unmark_position(ws_key)
+            await db.recalibrate_theme(pos.get("theme", "other"))
             log.info(
                 f"[TIME EXIT] LOSS {side} '{pos['question'][:40]}' @ {current_price:.2f}¢ "
                 f"PnL: ${pnl:.2f} ({pnl_pct:+.1%}) | {hours_left:.1f}h left"
@@ -489,7 +614,7 @@ async def main():
     log.info(f"[MAIN] Direct entry: ≥{CONFIG['ENTRY_MIN_PRICE']:.0%}")
     log.info(f"[MAIN] Watchlist: {CONFIG['WATCHLIST_MIN_PRICE']:.0%}-{CONFIG['ENTRY_MIN_PRICE']:.0%}")
     log.info(f"[MAIN] Max days: {CONFIG['MAX_DAYS_LEFT']}, ROI≥{CONFIG['MIN_ROI']:.0%}")
-    log.info(f"[MAIN] Max stake: ${CONFIG['MAX_STAKE']}, SL: 3-7% (dynamic)")
+    log.info(f"[MAIN] Max stake: ${CONFIG['MAX_STAKE']}, SL: 7-10% (dynamic)")
     log.info(f"[MAIN] Max open: {CONFIG['MAX_OPEN']}, per theme: {CONFIG['MAX_PER_THEME']}")
     log.info(f"[MAIN] Spread: <{CONFIG['MAX_SPREAD']:.0%}, Quality≥{CONFIG['MIN_QUALITY_SCORE']}")
     log.info(f"[MAIN] Risky themes excluded, time exit <{CONFIG['TIME_EXIT_HOURS']}h")
@@ -587,7 +712,8 @@ async def main():
             scan_count += 1
             log.info(f"[SCAN #{scan_count}] Starting...")
 
-            # 1. Time-based exits (check every scan)
+            # 1. Expired + time-based exits (check every scan)
+            await check_expired_positions(db, ws, tg)
             await check_time_exits(db, ws, tg)
 
             # 2. Fetch candidates

@@ -83,6 +83,18 @@ class Database:
                     created_at   TIMESTAMPTZ DEFAULT NOW()
                 );
 
+                CREATE TABLE IF NOT EXISTS micro_theme_stats (
+                    theme        TEXT PRIMARY KEY,
+                    trades       INTEGER DEFAULT 0,
+                    wins         INTEGER DEFAULT 0,
+                    losses       INTEGER DEFAULT 0,
+                    total_pnl    REAL DEFAULT 0,
+                    raw_wr       REAL DEFAULT 0.5,
+                    adj_wr       REAL DEFAULT 0.5,
+                    blocked      BOOLEAN DEFAULT FALSE,
+                    updated_at   TIMESTAMPTZ DEFAULT NOW()
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_micro_pos_status
                     ON micro_positions(status);
                 CREATE INDEX IF NOT EXISTS idx_micro_pos_market
@@ -337,6 +349,83 @@ class Database:
             else:
                 row = await conn.fetchrow(
                     "SELECT 1 FROM micro_positions WHERE market_id = $1 AND status = 'open'",
+                    market_id,
+                )
+            return row is not None
+
+    # ── Theme Calibration ──
+
+    SHRINKAGE_K = 20  # Bayesian shrinkage strength toward global mean
+    BLOCK_WR_THRESHOLD = 0.40  # block theme if adj WR < 40%
+    BLOCK_MIN_TRADES = 10  # need 10+ trades before blocking
+
+    async def recalibrate_theme(self, theme: str):
+        """Recalculate theme stats from closed positions using Bayesian shrinkage."""
+        async with self.pool.acquire() as conn:
+            # Theme stats
+            row = await conn.fetchrow("""
+                SELECT COUNT(*) as n,
+                       SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins,
+                       SUM(CASE WHEN result = 'LOSS' THEN 1 ELSE 0 END) as losses,
+                       COALESCE(SUM(pnl), 0) as total_pnl
+                FROM micro_positions WHERE theme = $1 AND status = 'closed'
+            """, theme)
+            n = row["n"] or 0
+            wins = row["wins"] or 0
+            losses = row["losses"] or 0
+            total_pnl = row["total_pnl"] or 0
+            raw_wr = wins / n if n > 0 else 0.5
+
+            # Global stats for shrinkage
+            g = await conn.fetchrow("""
+                SELECT COUNT(*) as n,
+                       SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins
+                FROM micro_positions WHERE status = 'closed'
+            """)
+            global_wr = (g["wins"] or 0) / (g["n"] or 1)
+
+            # Bayesian shrinkage: pull toward global mean
+            adj_wr = (n * raw_wr + self.SHRINKAGE_K * global_wr) / (n + self.SHRINKAGE_K)
+            blocked = n >= self.BLOCK_MIN_TRADES and adj_wr < self.BLOCK_WR_THRESHOLD
+
+            await conn.execute("""
+                INSERT INTO micro_theme_stats (theme, trades, wins, losses, total_pnl, raw_wr, adj_wr, blocked, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                ON CONFLICT (theme) DO UPDATE SET
+                    trades = $2, wins = $3, losses = $4, total_pnl = $5,
+                    raw_wr = $6, adj_wr = $7, blocked = $8, updated_at = NOW()
+            """, theme, n, wins, losses, total_pnl, round(raw_wr, 4), round(adj_wr, 4), blocked)
+
+            if blocked:
+                log.info(f"[THEME] BLOCKED '{theme}': {wins}/{n} WR={adj_wr:.1%} (raw={raw_wr:.1%})")
+            return blocked
+
+    async def is_theme_blocked(self, theme: str) -> bool:
+        """Check if theme is blocked due to poor performance."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT blocked FROM micro_theme_stats WHERE theme = $1", theme
+            )
+            return row["blocked"] if row else False
+
+    async def get_theme_stats(self) -> list:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM micro_theme_stats ORDER BY adj_wr DESC")
+            return [dict(r) for r in rows]
+
+    async def has_sl_loss(self, market_id: str, side: str = None) -> bool:
+        """Check if this market ever had a SL/rapid_drop loss — blacklist from re-entry."""
+        async with self.pool.acquire() as conn:
+            if side:
+                row = await conn.fetchrow(
+                    "SELECT 1 FROM micro_positions WHERE market_id = $1 AND side = $2 "
+                    "AND status = 'closed' AND close_reason IN ('stop_loss', 'rapid_drop')",
+                    market_id, side,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT 1 FROM micro_positions WHERE market_id = $1 "
+                    "AND status = 'closed' AND close_reason IN ('stop_loss', 'rapid_drop')",
                     market_id,
                 )
             return row is not None

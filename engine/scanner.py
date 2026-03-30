@@ -39,7 +39,7 @@ THEME_KEYWORDS = {
 }
 
 # Themes with ALWAYS-risky gap risk (sports scores, esports matches)
-RISKY_THEMES = {"sports", "esports"}
+RISKY_THEMES = {"sports", "esports", "israel", "military"}
 
 # Question patterns that indicate volatile/unpredictable outcomes
 # These are risky regardless of theme — price can gap from 95¢ to 0¢
