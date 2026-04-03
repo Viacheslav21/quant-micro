@@ -38,12 +38,12 @@ CONFIG = {
     "BANKROLL":           float(os.getenv("BANKROLL", "500")),
     "SIMULATION":         os.getenv("SIMULATION", "true").lower() == "true",
     "SCAN_INTERVAL":      int(os.getenv("SCAN_INTERVAL", "120")),
-    "MAX_STAKE":          float(os.getenv("MAX_STAKE", "5.0")),       # $5 max
-    "MIN_STAKE":          float(os.getenv("MIN_STAKE", "1.0")),
+    "MAX_STAKE":          float(os.getenv("MAX_STAKE", "50.0")),      # $50 max
+    "MIN_STAKE":          float(os.getenv("MIN_STAKE", "5.0")),
     "MAX_OPEN":           int(os.getenv("MAX_OPEN", "50")),
     "SL_PCT":             float(os.getenv("SL_PCT", "0.05")),        # 5% default
-    "ENTRY_MIN_PRICE":    float(os.getenv("ENTRY_MIN_PRICE", "0.93")), # 93¢ direct entry
-    "WATCHLIST_MIN_PRICE": float(os.getenv("WATCHLIST_MIN_PRICE", "0.88")), # 88¢ watchlist
+    "ENTRY_MIN_PRICE":    float(os.getenv("ENTRY_MIN_PRICE", "0.95")), # 95¢ direct entry (was 93¢)
+    "WATCHLIST_MIN_PRICE": float(os.getenv("WATCHLIST_MIN_PRICE", "0.90")), # 90¢ watchlist (was 88¢)
     "MAX_DAYS_LEFT":      float(os.getenv("MAX_DAYS_LEFT", "10")),   # 10 days — parse dates from questions
     "MIN_ROI":            float(os.getenv("MIN_ROI", "0.03")),
     "MIN_LIQUIDITY_MULT": float(os.getenv("MIN_LIQUIDITY_MULT", "500")),
@@ -85,6 +85,20 @@ def _handle_signal(sig, frame):
 
 signal.signal(signal.SIGTERM, _handle_signal)
 signal.signal(signal.SIGINT, _handle_signal)
+
+
+# ── Helpers ──
+
+def _days_to_expiry(pos: dict) -> float:
+    """Calculate days until position's market expires. Returns 999 if unknown."""
+    end_date_str = pos.get("end_date")
+    if not end_date_str:
+        return 999
+    try:
+        end = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
+        return max(0, (end - datetime.now(timezone.utc)).total_seconds() / 86400)
+    except Exception:
+        return 999
 
 
 # ── REST Price Verification ──
@@ -145,8 +159,8 @@ async def _check_volume_confirms(market_id: str) -> bool:
 # ── Stake Calculation ──
 
 def calc_stake(bankroll: float) -> float:
-    """Stake = min(MAX_STAKE, 1% of bankroll), but at least MIN_STAKE if bankroll allows."""
-    pct_stake = bankroll * 0.01
+    """Stake = min(MAX_STAKE, 5% of bankroll), but at least MIN_STAKE if bankroll allows."""
+    pct_stake = bankroll * 0.05
     stake = min(CONFIG["MAX_STAKE"], max(pct_stake, CONFIG["MIN_STAKE"]))
     # Don't stake if bankroll can't afford it
     if stake > bankroll:
@@ -165,9 +179,11 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     side = candidate.get("side", "YES")
 
     # Double-check: reject risky markets even if scanner passed them
+    # Exception: ≥96¢ markets are safe even in risky themes — outcome is nearly certain
     question = candidate.get("question", "")
     theme = candidate.get("theme", "other")
-    if is_risky_market(question, theme):
+    entry_price_check = candidate.get("best_ask") or candidate.get("price", 0)
+    if is_risky_market(question, theme) and entry_price_check < 0.96:
         return False
 
     if await db.has_position_on_market(market_id, side):
@@ -427,8 +443,11 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             )
         return
 
-    # ── Stop Loss ──
-    if pnl_pct <= -sl_pct:
+    # ── Stop Loss (disabled for markets ≤3 days to expiry — let them resolve) ──
+    # Data: resolved=100% WR, SL=0% WR. SL kills positions that would have resolved correctly.
+    days_to_expiry = _days_to_expiry(pos)
+    if pnl_pct <= -sl_pct and days_to_expiry > 3:
+        # Only apply SL for markets >3 days out — near-expiry markets should ride to resolution
         # Verify via REST before closing — WS book can be stale/incomplete
         rest_price = await _verify_price_rest(market_id, side)
         if rest_price is not None:
@@ -466,8 +485,8 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             )
         return
 
-    # ── Rapid Drop Guard (7¢ — wider to survive normal fluctuations) ──
-    if bid_price < entry_price - 0.07:
+    # ── Rapid Drop Guard (7¢ — disabled for ≤3 days to expiry, let it resolve) ──
+    if bid_price < entry_price - 0.07 and days_to_expiry > 3:
         # Verify via REST before closing
         rest_price = await _verify_price_rest(market_id, side)
         if rest_price is not None and rest_price >= entry_price - 0.07:

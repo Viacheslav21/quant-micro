@@ -298,10 +298,15 @@ class MicroScanner:
                 if spread > max_spread:
                     continue
 
+                # Skip markets not accepting orders (in review / paused)
+                if not m.get("acceptingOrders", True):
+                    continue
+
                 theme = classify_theme(question)
 
-                # Skip risky markets — these have gap risk
-                if is_risky_market(question, theme):
+                # Skip risky markets — these have gap risk (except ≥96¢ which are near-certain)
+                best_price = max(yes_price, no_price)
+                if is_risky_market(question, theme) and best_price < 0.96:
                     skipped_risky += 1
                     continue
 
