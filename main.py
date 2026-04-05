@@ -341,7 +341,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         f"{'✅' if side=='YES' else '❌'} {side} <b>{question[:80]}</b>\n"
         f"📊 Вход: <b>{entry_price*100:.1f}¢</b> | Ставка: <b>${stake:.2f}</b>\n"
         f"💹 ROI: {roi:.1%} | Q={quality:.0f} | {days}d left\n"
-        f"📉 Spread: {candidate.get('spread', 0)*100:.1f}¢ | SL: {'OFF' if float(days or 999) <= 3 else f'{sl_pct:.0%}'}\n"
+        f"📉 Spread: {candidate.get('spread', 0)*100:.1f}¢ | SL: {'OFF' if (isinstance(days, (int, float)) and days <= 3) else f'{sl_pct:.0%}'}\n"
         f"💼 Банк: ${stats_now.get('bankroll', 0):.0f} | Открыто: {open_count+1}\n"
         f"🔗 <a href='https://polymarket.com/event/{candidate.get('market_id', '')}'>Polymarket</a>"
     )
