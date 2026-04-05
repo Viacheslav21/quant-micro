@@ -27,9 +27,9 @@ class MicroWS:
         self.ws = None
         self._running = False
         self._subscribed_tokens: set = set()
-        self._token_to_key: dict[str, str] = {}      # token_id -> ws_key
-        self._token_invert: dict[str, bool] = {}      # token_id -> True if NO side (invert price)
-        self.prices: dict[str, dict] = {}              # ws_key -> {price, best_bid, best_ask, ...}
+        self._token_to_keys: dict[str, list[str]] = {}  # token_id -> [ws_key, ...] (one token can serve YES + NO)
+        self._key_invert: dict[str, bool] = {}           # ws_key -> True if NO side (invert price)
+        self.prices: dict[str, dict] = {}                # ws_key -> {price, best_bid, best_ask, ...}
         self._last_watchlist_check: dict[str, float] = {}
 
         self._on_watchlist_price: Optional[Callable] = None
@@ -45,11 +45,14 @@ class MicroWS:
         """Register a single side for tracking. Returns tokens to subscribe."""
         tokens_to_add = []
 
-        if token_id and token_id not in self._subscribed_tokens:
-            self._token_to_key[token_id] = ws_key
-            self._token_invert[token_id] = (token_side == "no")
-            self._subscribed_tokens.add(token_id)
-            tokens_to_add.append(token_id)
+        if token_id:
+            self._key_invert[ws_key] = (token_side == "no")
+            if token_id not in self._subscribed_tokens:
+                self._token_to_keys[token_id] = [ws_key]
+                self._subscribed_tokens.add(token_id)
+                tokens_to_add.append(token_id)
+            elif ws_key not in self._token_to_keys.get(token_id, []):
+                self._token_to_keys[token_id].append(ws_key)
 
         if ws_key not in self.prices:
             self.prices[ws_key] = {
@@ -69,14 +72,19 @@ class MicroWS:
     def unregister_market(self, ws_key: str) -> list:
         tokens_to_remove = []
         info = self.prices.pop(ws_key, None)
+        self._key_invert.pop(ws_key, None)
         if not info:
             return tokens_to_remove
         token_id = info.get("token_id")
         if token_id and token_id in self._subscribed_tokens:
-            self._subscribed_tokens.discard(token_id)
-            self._token_to_key.pop(token_id, None)
-            self._token_invert.pop(token_id, None)
-            tokens_to_remove.append(token_id)
+            keys = self._token_to_keys.get(token_id, [])
+            if ws_key in keys:
+                keys.remove(ws_key)
+            if not keys:
+                # No more ws_keys using this token — unsubscribe
+                self._subscribed_tokens.discard(token_id)
+                self._token_to_keys.pop(token_id, None)
+                tokens_to_remove.append(token_id)
         return tokens_to_remove
 
     def mark_as_position(self, ws_key: str):
@@ -174,8 +182,16 @@ class MicroWS:
             return
         for tid in token_ids:
             self._subscribed_tokens.discard(tid)
-            self._token_to_key.pop(tid, None)
-            self._token_invert.pop(tid, None)
+            self._token_to_keys.pop(tid, None)
+        # Send unsubscribe to server (bug #10 fix)
+        for i in range(0, len(token_ids), BATCH_SIZE):
+            batch = token_ids[i:i + BATCH_SIZE]
+            try:
+                msg = {"assets_ids": batch, "type": "market", "action": "unsubscribe"}
+                await self.ws.send(json.dumps(msg))
+                log.debug(f"[WS] Unsubscribed {len(batch)} tokens")
+            except Exception as e:
+                log.warning(f"[WS] Unsubscribe send failed: {e}")
 
     async def _subscribe_all(self, ws):
         if not self._subscribed_tokens:
@@ -212,43 +228,44 @@ class MicroWS:
         elif event_type == "book":
             await self._handle_book(data)
 
-    def _to_side_price(self, token_id: str, raw_price: float) -> float:
-        """Convert raw token price to our side's price (invert if NO)."""
-        if self._token_invert.get(token_id, False):
+    def _side_price(self, ws_key: str, raw_price: float) -> float:
+        """Convert raw token price to the side's price (invert if NO)."""
+        if self._key_invert.get(ws_key, False):
             return round(1.0 - raw_price, 4)
         return raw_price
 
     async def _handle_price(self, data):
         token_id = data.get("asset_id", "")
-        ws_key = self._token_to_key.get(token_id)
-        if not ws_key or ws_key not in self.prices:
+        ws_keys = self._token_to_keys.get(token_id)
+        if not ws_keys:
             return
 
         raw = float(data.get("price", 0))
         if raw <= 0 or raw > 1.0:
             return
 
-        info = self.prices[ws_key]
-        new_price = self._to_side_price(token_id, raw)
+        for ws_key in ws_keys:
+            info = self.prices.get(ws_key)
+            if not info:
+                continue
 
-        # Sanity: reject wild price jumps (>50% from current) — likely bad tick
-        old_price = info.get("price", 0.5)
-        if old_price > 0.1 and abs(new_price - old_price) > old_price * 0.5:
-            log.warning(f"[WS] Wild tick rejected: {ws_key} {old_price:.4f}→{new_price:.4f} (raw={raw:.4f})")
-            return
+            new_price = self._side_price(ws_key, raw)
 
-        info["price"] = new_price
-        info["last_update"] = time.time()
-        await self._dispatch(ws_key, info)
+            # Sanity: reject wild price jumps (>50% from current) — likely bad tick
+            old_price = info.get("price", 0.5)
+            if old_price > 0.1 and abs(new_price - old_price) > old_price * 0.5:
+                log.warning(f"[WS] Wild tick rejected: {ws_key} {old_price:.4f}→{new_price:.4f} (raw={raw:.4f})")
+                continue
+
+            info["price"] = new_price
+            info["last_update"] = time.time()
+            await self._dispatch(ws_key, info)
 
     async def _handle_book(self, data):
         token_id = data.get("asset_id", "")
-        ws_key = self._token_to_key.get(token_id)
-        if not ws_key or ws_key not in self.prices:
+        ws_keys = self._token_to_keys.get(token_id)
+        if not ws_keys:
             return
-
-        info = self.prices[ws_key]
-        invert = self._token_invert.get(token_id, False)
 
         bids = data.get("bids", [])
         asks = data.get("asks", [])
@@ -268,28 +285,35 @@ class MicroWS:
             if p > 0 and s > 0 and (raw_best_ask == 0 or p < raw_best_ask):
                 raw_best_ask = p
 
-        if not invert:
-            if raw_best_bid > 0:
-                info["best_bid"] = raw_best_bid
-            if raw_best_ask > 0:
-                info["best_ask"] = raw_best_ask
-        else:
-            # NO side: subscribed to YES token, invert to get NO prices
-            # NO bid = 1 - YES ask (what we'd get selling NO)
-            # NO ask = 1 - YES bid (what we'd pay buying NO)
-            if raw_best_ask > 0:
-                info["best_bid"] = round(1.0 - raw_best_ask, 4)
-            if raw_best_bid > 0:
-                info["best_bid_from_book"] = True  # mark that we got a real book update
-                info["best_ask"] = round(1.0 - raw_best_bid, 4)
+        for ws_key in ws_keys:
+            info = self.prices.get(ws_key)
+            if not info:
+                continue
 
-        # Sanity check: bid/ask must be in valid range and bid < ask
-        bid = info.get("best_bid", 0)
-        ask = info.get("best_ask", 0)
-        if bid <= 0.001 or bid >= 1.0:
-            info["best_bid"] = info["price"]  # fallback to last price
-        if ask <= 0.001 or ask >= 1.0:
-            info["best_ask"] = info["price"]
+            invert = self._key_invert.get(ws_key, False)
 
-        info["last_update"] = time.time()
-        await self._dispatch(ws_key, info)
+            if not invert:
+                if raw_best_bid > 0:
+                    info["best_bid"] = raw_best_bid
+                if raw_best_ask > 0:
+                    info["best_ask"] = raw_best_ask
+            else:
+                # NO side: subscribed to YES token, invert to get NO prices
+                # NO bid = 1 - YES ask (what we'd get selling NO)
+                # NO ask = 1 - YES bid (what we'd pay buying NO)
+                if raw_best_ask > 0:
+                    info["best_bid"] = round(1.0 - raw_best_ask, 4)
+                if raw_best_bid > 0:
+                    info["best_bid_from_book"] = True
+                    info["best_ask"] = round(1.0 - raw_best_bid, 4)
+
+            # Sanity check: bid/ask must be in valid range and bid < ask
+            bid = info.get("best_bid", 0)
+            ask = info.get("best_ask", 0)
+            if bid <= 0.001 or bid >= 1.0:
+                info["best_bid"] = info["price"]
+            if ask <= 0.001 or ask >= 1.0:
+                info["best_ask"] = info["price"]
+
+            info["last_update"] = time.time()
+            await self._dispatch(ws_key, info)

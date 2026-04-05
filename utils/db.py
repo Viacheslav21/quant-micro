@@ -24,7 +24,8 @@ class Database:
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS micro_watchlist (
-                    market_id    TEXT PRIMARY KEY,
+                    market_id    TEXT NOT NULL,
+                    side         TEXT NOT NULL DEFAULT 'YES',
                     question     TEXT NOT NULL,
                     theme        TEXT DEFAULT 'other',
                     yes_price    REAL NOT NULL,
@@ -39,7 +40,8 @@ class Database:
                     yes_token    TEXT,
                     no_token     TEXT,
                     added_at     TIMESTAMPTZ DEFAULT NOW(),
-                    updated_at   TIMESTAMPTZ DEFAULT NOW()
+                    updated_at   TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (market_id, side)
                 );
 
                 CREATE TABLE IF NOT EXISTS micro_positions (
@@ -129,6 +131,19 @@ class Database:
                 await conn.execute(f"""
                     ALTER TABLE micro_watchlist DROP COLUMN IF EXISTS {col};
                 """)
+            # Migration: add side column + change PK to (market_id, side) for dual-side support
+            try:
+                has_side = await conn.fetchval("""
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='micro_watchlist' AND column_name='side'
+                """)
+                if not has_side:
+                    await conn.execute("ALTER TABLE micro_watchlist ADD COLUMN side TEXT NOT NULL DEFAULT 'YES'")
+                    await conn.execute("ALTER TABLE micro_watchlist DROP CONSTRAINT IF EXISTS micro_watchlist_pkey")
+                    await conn.execute("ALTER TABLE micro_watchlist ADD PRIMARY KEY (market_id, side)")
+                    log.info("[DB] Migrated micro_watchlist: added side column + composite PK")
+            except Exception as e:
+                log.warning(f"[DB] Watchlist side migration: {e}")
         log.info("[DB] Schema ready")
 
     # ── Watchlist ──
@@ -137,11 +152,11 @@ class Database:
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO micro_watchlist
-                    (market_id, question, theme, yes_price,
+                    (market_id, side, question, theme, yes_price,
                      volume, liquidity, spread, best_ask,
                      days_left, end_date, roi, quality, yes_token, no_token)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-                ON CONFLICT (market_id) DO UPDATE SET
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                ON CONFLICT (market_id, side) DO UPDATE SET
                     yes_price  = EXCLUDED.yes_price,
                     volume     = EXCLUDED.volume,
                     liquidity  = EXCLUDED.liquidity,
@@ -152,7 +167,8 @@ class Database:
                     quality    = EXCLUDED.quality,
                     updated_at = NOW()
             """,
-                market["market_id"], market["question"], market.get("theme", "other"),
+                market["market_id"], market.get("side", "YES"),
+                market["question"], market.get("theme", "other"),
                 market.get("price", market.get("yes_price", 0)),
                 market.get("volume", 0), market.get("liquidity", 0),
                 market.get("spread", 0), market.get("best_ask", 0),

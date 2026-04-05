@@ -110,8 +110,13 @@ def _parse_date_from_question(question: str):
             day = calendar.monthrange(datetime.now(timezone.utc).year, month)[1]
         else:
             day = int(m.group(2))
+        now = datetime.now(timezone.utc)
         try:
-            return datetime(datetime.now(timezone.utc).year, month, day, 23, 59, tzinfo=timezone.utc)
+            dt = datetime(now.year, month, day, 23, 59, tzinfo=timezone.utc)
+            # If no explicit year and date is >30 days in the past, assume next year
+            if (now - dt).days > 30:
+                dt = dt.replace(year=now.year + 1)
+            return dt
         except (ValueError, OverflowError):
             continue
 
@@ -122,8 +127,12 @@ def _parse_date_from_question(question: str):
         month = _MONTH_MAP.get(month_str)
         day = int(m.group(2))
         if month:
+            now = datetime.now(timezone.utc)
             try:
-                return datetime(datetime.now(timezone.utc).year, month, day, 23, 59, tzinfo=timezone.utc)
+                dt = datetime(now.year, month, day, 23, 59, tzinfo=timezone.utc)
+                if (now - dt).days > 30:
+                    dt = dt.replace(year=now.year + 1)
+                return dt
             except (ValueError, OverflowError):
                 pass
 
@@ -269,7 +278,7 @@ class MicroScanner:
                 if isinstance(raw_prices, str):
                     raw_prices = _json.loads(raw_prices)
                 yes_price = float(raw_prices[0])
-                no_price = round(1.0 - yes_price, 4)
+                no_price = float(raw_prices[1]) if len(raw_prices) > 1 else round(1.0 - yes_price, 4)
 
                 # Neither side in our target zone — skip early
                 if yes_price < wl_min and no_price < wl_min:

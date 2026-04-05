@@ -54,7 +54,6 @@ CONFIG = {
     "SCAN_PAGES":         int(os.getenv("SCAN_PAGES", "16")),        # 1600 markets
     "MIN_VOLUME":         float(os.getenv("MIN_VOLUME", "50000")),   # 50k volume
     "MIN_QUALITY_SCORE":  float(os.getenv("MIN_QUALITY_SCORE", "25")), # quality gate (was 35)
-    "TIME_EXIT_HOURS":    float(os.getenv("TIME_EXIT_HOURS", "4")),  # exit if losing <4h before expiry
 }
 
 # ── Logging ──
@@ -209,7 +208,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     if await db.has_sl_loss(market_id, side):
         return False
 
-    # Cooldown: don't re-enter markets recently closed (prevents TIME EXIT → re-entry loop)
+    # Cooldown: don't re-enter markets recently closed
     if await db.has_recent_close(market_id, side, hours=6):
         return False
 
@@ -407,7 +406,7 @@ async def check_watchlist_price(ws_key: str, price: float, info: dict,
 
 async def check_position_price(ws_key: str, price: float, info: dict,
                                 db: Database, ws: MicroWS, tg: TelegramBot):
-    """WS callback: position price updated. Check SL/resolution/time-exit."""
+    """WS callback: position price updated. Check SL/resolution."""
     if _shutdown:
         return
 
@@ -611,62 +610,6 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
             )
 
 
-async def check_time_exits(db: Database, ws: MicroWS, tg: TelegramBot):
-    """Close positions that are losing with <TIME_EXIT_HOURS hours until resolution."""
-    open_pos = await db.get_open_positions()
-    now = datetime.now(timezone.utc)
-    exit_hours = CONFIG["TIME_EXIT_HOURS"]
-
-    for pos in open_pos:
-        end_date_str = pos.get("end_date")
-        if not end_date_str:
-            continue
-        try:
-            end = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
-        except Exception:
-            continue
-
-        hours_left = (end - now).total_seconds() / 3600
-        if hours_left > exit_hours:
-            continue
-
-        # Only exit if position is in the red
-        entry_price = pos["entry_price"]
-        current_price = pos.get("current_price", entry_price)
-        if current_price >= entry_price:
-            continue  # in profit or flat, let it ride to resolution
-
-        # Verify via REST — WS price might be stale
-        rest_price = await _verify_price_rest(pos["market_id"], pos["side"])
-        if rest_price is not None:
-            if rest_price >= entry_price:
-                continue  # REST says we're in profit, skip time exit
-            current_price = rest_price  # use fresher REST price for PnL
-
-        pnl_pct = (current_price - entry_price) / entry_price
-        pnl = pnl_pct * pos["stake_amt"]
-
-        closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "time_exit")
-        if closed:
-            side = pos["side"]
-            ws_key = f"{pos['market_id']}_{side}"
-            ws.unmark_position(ws_key)
-            await db.recalibrate_theme(pos.get("theme", "other"))
-            log.info(
-                f"[TIME EXIT] LOSS {side} '{pos['question'][:40]}' @ {current_price:.2f}¢ "
-                f"PnL: ${pnl:.2f} ({pnl_pct:+.1%}) | {hours_left:.1f}h left"
-            )
-            await db.log_event("CLOSE_TIME", pos["market_id"], {
-                "side": side, "pnl": round(pnl, 4), "entry": entry_price,
-                "exit": current_price, "hours_left": round(hours_left, 1),
-            })
-            await tg.send(
-                f"<b>TIME EXIT</b> {side}\n{pos['question'][:60]}\n"
-                f"Entry: {entry_price:.2f}¢ → {current_price:.2f}¢\n"
-                f"PnL: ${pnl:.2f} | {hours_left:.1f}h to expiry"
-            )
-
-
 # ── Main Loop ──
 
 async def main():
@@ -681,7 +624,7 @@ async def main():
     log.info(f"[MAIN] Max stake: ${CONFIG['MAX_STAKE']}, SL: 7-10% (dynamic)")
     log.info(f"[MAIN] Max open: {CONFIG['MAX_OPEN']}, per theme: {CONFIG['MAX_PER_THEME']}")
     log.info(f"[MAIN] Spread: <{CONFIG['MAX_SPREAD']:.0%}, Quality≥{CONFIG['MIN_QUALITY_SCORE']}")
-    log.info(f"[MAIN] Risky themes excluded, time exit <{CONFIG['TIME_EXIT_HOURS']}h")
+    log.info(f"[MAIN] Risky themes excluded")
     log.info("=" * 60)
 
     db = Database()
@@ -776,9 +719,8 @@ async def main():
             scan_count += 1
             log.info(f"[SCAN #{scan_count}] Starting...")
 
-            # 1. Expired + time-based exits (check every scan)
+            # 1. Expired positions (check every scan)
             await check_expired_positions(db, ws, tg)
-            await check_time_exits(db, ws, tg)
 
             # 2. Fetch candidates
             direct, watchlist = await scanner.fetch_candidates()
