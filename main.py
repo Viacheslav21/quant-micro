@@ -77,6 +77,9 @@ _http_client: httpx.AsyncClient | None = None
 _pos_cache: dict = {}  # ws_key -> position dict (in-memory cache to avoid DB reads on every WS tick)
 _pos_last_db_write: dict = {}  # pos_id -> timestamp of last DB price write
 _POS_DB_WRITE_INTERVAL = 30  # seconds between DB price writes per position
+_last_scan_at = 0.0  # timestamp of last successful scan
+_scan_count_global = 0
+_WATCHDOG_STALE_SECONDS = 900  # 15 min
 
 
 def _handle_signal(sig, frame):
@@ -336,7 +339,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         f"💹 ROI: {roi:.1%} | Q={quality:.0f} | {days}d left\n"
         f"📉 Spread: {candidate.get('spread', 0)*100:.1f}¢ | SL: {'OFF' if (isinstance(days, (int, float)) and days <= 3) else f'{sl_pct:.0%}'}\n"
         f"💼 Банк: ${stats_now.get('bankroll', 0):.0f} | Открыто: {open_count+1}\n"
-        f"🔗 <a href='https://polymarket.com/event/{candidate.get('market_id', '')}'>Polymarket</a>"
+        f"🔗 <a href='https://polymarket.com/event/{candidate.get('slug') or candidate.get('market_id', '')}'>Polymarket</a>"
     )
     return True
 
@@ -724,6 +727,57 @@ async def main():
         f"Open: {len(open_pos)} positions"
     )
 
+    # ── Watchdog: alert if scan loop stalls ──
+
+    async def _watchdog():
+        global _last_scan_at
+        _last_scan_at = time.time()
+        while not _shutdown:
+            await asyncio.sleep(60)
+            if _last_scan_at and time.time() - _last_scan_at > _WATCHDOG_STALE_SECONDS:
+                stale_min = int((time.time() - _last_scan_at) / 60)
+                log.error(f"[WATCHDOG] Scan loop stale! Last scan {stale_min}m ago")
+                await tg.send(
+                    f"<b>MICRO WATCHDOG</b>\n"
+                    f"Scan loop stale — last run {stale_min}m ago\n"
+                    f"Scan #{_scan_count_global} | WS={'connected' if ws.ws else 'DISCONNECTED'}"
+                )
+                _last_scan_at = time.time()
+    watchdog_task = asyncio.create_task(_watchdog())
+
+    # ── Health endpoint ──
+
+    async def _health_server():
+        from aiohttp import web
+        async def _health_handler(request):
+            stale = time.time() - _last_scan_at if _last_scan_at else 9999
+            healthy = stale < _WATCHDOG_STALE_SECONDS and not _shutdown
+            import json
+            data = {
+                "status": "ok" if healthy else "stale",
+                "scan_count": _scan_count_global,
+                "last_scan_age_s": int(stale),
+                "ws_connected": ws.ws is not None,
+                "positions_cached": len(_pos_cache),
+                "shutdown": _shutdown,
+            }
+            return web.Response(text=json.dumps(data), content_type="application/json",
+                                status=200 if healthy else 503)
+        app_h = web.Application()
+        app_h.router.add_get("/health", _health_handler)
+        runner = web.AppRunner(app_h)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("HEALTH_PORT", "8082")))
+        try:
+            await site.start()
+            log.info(f"[HEALTH] Listening on :{os.getenv('HEALTH_PORT', '8082')}")
+        except OSError as e:
+            log.warning(f"[HEALTH] Could not start health server: {e}")
+    try:
+        asyncio.create_task(_health_server())
+    except Exception:
+        pass
+
     # ── Scan Loop ──
 
     scan_count = 0
@@ -807,6 +861,9 @@ async def main():
                 "watchlist": len(watchlist), "new_ws": new_ws,
                 "open": len(open_pos), "bankroll": round(bankroll, 2),
             })
+
+            _last_scan_at = time.time()
+            _scan_count_global = scan_count
 
             await asyncio.sleep(CONFIG["SCAN_INTERVAL"])
 

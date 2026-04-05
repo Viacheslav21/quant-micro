@@ -363,8 +363,13 @@ class MicroScanner:
                         continue
                     seen.add(key)
 
+                    events = m.get("events") or []
+                    event_slug = events[0].get("slug", "") if events else ""
+                    url_slug = event_slug or m.get("slug", "")
+
                     c = {
                         "market_id": market_id,
+                        "slug":      url_slug,
                         "question":  question,
                         "theme":     theme,
                         "side":      info["side"],
