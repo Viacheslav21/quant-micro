@@ -890,12 +890,13 @@ async def main():
         except asyncio.TimeoutError:
             log.error(f"[MAIN] Scan #{scan_count} timed out after {_SCAN_TIMEOUT}s!")
             await tg.send(f"⏰ <b>MICRO SCAN TIMEOUT</b>\nScan #{scan_count} exceeded {_SCAN_TIMEOUT}s")
-            _last_scan_at = time.time()
-            _scan_count_global = scan_count
             await asyncio.sleep(5)
         except Exception as e:
             log.error(f"[MAIN] Loop error: {e}", exc_info=True)
             await asyncio.sleep(5)
+        finally:
+            _last_scan_at = time.time()
+            _scan_count_global = scan_count
 
     # ── Shutdown ──
 
