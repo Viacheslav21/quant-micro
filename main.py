@@ -742,7 +742,7 @@ async def main():
                     f"Scan loop stale — last run {stale_min}m ago\n"
                     f"Scan #{_scan_count_global} | WS={'connected' if ws.ws else 'DISCONNECTED'}"
                 )
-                _last_scan_at = time.time()
+                _last_scan_at = time.time()  # reset to avoid spam (re-alert in 15 min if still stuck)
     watchdog_task = asyncio.create_task(_watchdog())
 
     # ── Health endpoint ──
@@ -780,6 +780,8 @@ async def main():
 
     # ── Scan Loop ──
 
+    _SCAN_TIMEOUT = 600  # 10 min max per scan cycle
+
     scan_count = 0
 
     while not _shutdown:
@@ -787,86 +789,89 @@ async def main():
             scan_count += 1
             log.info(f"[SCAN #{scan_count}] Starting...")
 
-            # 1. Expired positions (check every scan)
-            await check_expired_positions(db, ws, tg)
+            async with asyncio.timeout(_SCAN_TIMEOUT):
+                # 1. Expired positions (check every scan)
+                await check_expired_positions(db, ws, tg)
 
-            # 2. Fetch candidates
-            direct, watchlist = await scanner.fetch_candidates()
+                # 2. Fetch candidates
+                direct, watchlist = await scanner.fetch_candidates()
 
-            # 3. Direct entries (≥93¢)
-            entered = 0
-            for c in direct:
-                if _shutdown:
-                    break
-                if await try_enter(c, db, ws, tg, source="scan"):
-                    entered += 1
-                    await asyncio.sleep(0.5)
+                # 3. Direct entries (≥93¢)
+                entered = 0
+                for c in direct:
+                    if _shutdown:
+                        break
+                    if await try_enter(c, db, ws, tg, source="scan"):
+                        entered += 1
+                        await asyncio.sleep(0.5)
 
-            # 4. Watchlist (90-95¢) → register in WS for price monitoring
-            if watchlist:
-                await db.upsert_watchlist_batch(watchlist)
-            new_ws = 0
-            for c in watchlist:
-                ws_key = f"{c['market_id']}_{c['side']}"
-                if ws_key not in ws.prices:
-                    # ws_token already points to YES token (scanner fixed)
-                    # ws_side tells ws_client whether to invert
-                    tokens = ws.register_market(
-                        ws_key,
-                        token_id=c.get("ws_token"),
-                        token_side=c.get("ws_side", c["side"].lower()),
-                        price=c["price"],
-                        question=c["question"],
-                        is_position=False,
-                    )
-                    if tokens:
-                        await ws.subscribe_tokens(tokens)
-                        new_ws += 1
+                # 4. Watchlist (90-95¢) → register in WS for price monitoring
+                if watchlist:
+                    await db.upsert_watchlist_batch(watchlist)
+                new_ws = 0
+                for c in watchlist:
+                    ws_key = f"{c['market_id']}_{c['side']}"
+                    if ws_key not in ws.prices:
+                        tokens = ws.register_market(
+                            ws_key,
+                            token_id=c.get("ws_token"),
+                            token_side=c.get("ws_side", c["side"].lower()),
+                            price=c["price"],
+                            question=c["question"],
+                            is_position=False,
+                        )
+                        if tokens:
+                            await ws.subscribe_tokens(tokens)
+                            new_ws += 1
 
-            # 5. Status
-            open_pos = await db.get_open_positions()
-            stats = await db.get_stats()
-            bankroll = stats.get("bankroll", CONFIG["BANKROLL"])
-            total_unrealized = sum(p.get("unrealized_pnl", 0) for p in open_pos)
-            equity = bankroll + total_unrealized
-            await db.update_peak_equity(equity)
+                # 5. Status
+                open_pos = await db.get_open_positions()
+                stats = await db.get_stats()
+                bankroll = stats.get("bankroll", CONFIG["BANKROLL"])
+                total_unrealized = sum(p.get("unrealized_pnl", 0) for p in open_pos)
+                equity = bankroll + total_unrealized
+                await db.update_peak_equity(equity)
 
-            log.info(
-                f"[SCAN #{scan_count}] Direct: {len(direct)} ({entered} entered) | "
-                f"WL: {len(watchlist)} ({new_ws} new WS) | Open: {len(open_pos)} | "
-                f"Bankroll: ${bankroll:.2f} | Equity: ${equity:.2f} | "
-                f"PnL: ${stats.get('total_pnl', 0):.2f} | "
-                f"W/L: {stats.get('wins', 0)}/{stats.get('losses', 0)}"
-            )
+                log.info(
+                    f"[SCAN #{scan_count}] Direct: {len(direct)} ({entered} entered) | "
+                    f"WL: {len(watchlist)} ({new_ws} new WS) | Open: {len(open_pos)} | "
+                    f"Bankroll: ${bankroll:.2f} | Equity: ${equity:.2f} | "
+                    f"PnL: ${stats.get('total_pnl', 0):.2f} | "
+                    f"W/L: {stats.get('wins', 0)}/{stats.get('losses', 0)}"
+                )
 
-            # 6. Cleanup stale WS (every 30 scans)
-            if scan_count % 30 == 0:
-                await db.cleanup_watchlist()
-                wl_data = await db.get_watchlist()
-                wl_ids = {w["market_id"] for w in wl_data}
-                pos_keys = {f"{p['market_id']}_{p['side']}" for p in open_pos}
-                to_remove = []
-                for ws_key in list(ws.prices.keys()):
-                    market_id = ws_key.rsplit("_", 1)[0] if "_" in ws_key else ws_key
-                    if market_id not in wl_ids and ws_key not in pos_keys:
-                        to_remove.append(ws_key)
-                for ws_key in to_remove:
-                    tokens = ws.unregister_market(ws_key)
-                    await ws.unsubscribe_tokens(tokens)
-                if to_remove:
-                    log.info(f"[CLEANUP] Removed {len(to_remove)} stale WS entries")
+                # 6. Cleanup stale WS (every 30 scans)
+                if scan_count % 30 == 0:
+                    await db.cleanup_watchlist()
+                    wl_data = await db.get_watchlist()
+                    wl_ids = {w["market_id"] for w in wl_data}
+                    pos_keys = {f"{p['market_id']}_{p['side']}" for p in open_pos}
+                    to_remove = []
+                    for ws_key in list(ws.prices.keys()):
+                        market_id = ws_key.rsplit("_", 1)[0] if "_" in ws_key else ws_key
+                        if market_id not in wl_ids and ws_key not in pos_keys:
+                            to_remove.append(ws_key)
+                    for ws_key in to_remove:
+                        tokens = ws.unregister_market(ws_key)
+                        await ws.unsubscribe_tokens(tokens)
+                    if to_remove:
+                        log.info(f"[CLEANUP] Removed {len(to_remove)} stale WS entries")
 
-            await db.log_event("SCAN", details={
-                "scan": scan_count, "direct": len(direct), "entered": entered,
-                "watchlist": len(watchlist), "new_ws": new_ws,
-                "open": len(open_pos), "bankroll": round(bankroll, 2),
-            })
+                await db.log_event("SCAN", details={
+                    "scan": scan_count, "direct": len(direct), "entered": entered,
+                    "watchlist": len(watchlist), "new_ws": new_ws,
+                    "open": len(open_pos), "bankroll": round(bankroll, 2),
+                })
 
             _last_scan_at = time.time()
             _scan_count_global = scan_count
 
             await asyncio.sleep(CONFIG["SCAN_INTERVAL"])
 
+        except TimeoutError:
+            log.error(f"[MAIN] Scan #{scan_count} timed out after {_SCAN_TIMEOUT}s!")
+            await tg.send(f"⏰ <b>MICRO SCAN TIMEOUT</b>\nScan #{scan_count} exceeded {_SCAN_TIMEOUT}s")
+            await asyncio.sleep(5)
         except Exception as e:
             log.error(f"[MAIN] Loop error: {e}", exc_info=True)
             await asyncio.sleep(5)
