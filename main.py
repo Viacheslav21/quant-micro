@@ -45,15 +45,15 @@ CONFIG = {
     "ENTRY_MIN_PRICE":    float(os.getenv("ENTRY_MIN_PRICE", "0.95")), # 95¢ direct entry (was 93¢)
     "WATCHLIST_MIN_PRICE": float(os.getenv("WATCHLIST_MIN_PRICE", "0.90")), # 90¢ watchlist (was 88¢)
     "MAX_DAYS_LEFT":      float(os.getenv("MAX_DAYS_LEFT", "10")),   # 10 days — parse dates from questions
-    "MIN_ROI":            float(os.getenv("MIN_ROI", "0.03")),
-    "MIN_LIQUIDITY_MULT": float(os.getenv("MIN_LIQUIDITY_MULT", "500")),
+    "MIN_ROI":            float(os.getenv("MIN_ROI", "0.01")),       # 1% (was 3% — blocked 97¢+ markets)
+    "MIN_LIQUIDITY_MULT": float(os.getenv("MIN_LIQUIDITY_MULT", "100")),  # was 500 — too strict for $50 stakes
     "MAX_SPREAD":         float(os.getenv("MAX_SPREAD", "0.02")),    # 2¢ tight spread
     "RESOLUTION_PRICE":   float(os.getenv("RESOLUTION_PRICE", "0.99")),
     "MAX_PER_THEME":      int(os.getenv("MAX_PER_THEME", "5")),     # limit correlated risk
     "CONFIG_TAG":         os.getenv("CONFIG_TAG", "micro-v4"),
     "SCAN_PAGES":         int(os.getenv("SCAN_PAGES", "16")),        # 1600 markets
     "MIN_VOLUME":         float(os.getenv("MIN_VOLUME", "50000")),   # 50k volume
-    "MIN_QUALITY_SCORE":  float(os.getenv("MIN_QUALITY_SCORE", "35")), # quality gate
+    "MIN_QUALITY_SCORE":  float(os.getenv("MIN_QUALITY_SCORE", "25")), # quality gate (was 35)
     "TIME_EXIT_HOURS":    float(os.getenv("TIME_EXIT_HOURS", "4")),  # exit if losing <4h before expiry
 }
 
@@ -88,6 +88,18 @@ signal.signal(signal.SIGINT, _handle_signal)
 
 
 # ── Helpers ──
+
+def _days_to_expiry_from_pos(pos: dict, date_field: str = "end_date") -> float:
+    """Calculate hours since a date field (for hold time tracking)."""
+    val = pos.get(date_field)
+    if not val:
+        return 0
+    try:
+        dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+        return abs((datetime.now(timezone.utc) - dt).total_seconds() / 3600)
+    except Exception:
+        return 0
+
 
 def _days_to_expiry(pos: dict) -> float:
     """Calculate days until position's market expires. Returns 999 if unknown."""
@@ -322,11 +334,16 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         "spread": candidate.get("spread", 0), "source": source, "mode": mode,
     })
 
+    stats_now = await db.get_stats()
+    open_count = len(await db.get_open_positions())
     await tg.send(
-        f"<b>MICRO {source.upper()}</b> {mode}\n"
-        f"{side} <b>{question[:60]}</b>\n"
-        f"Entry: {entry_price:.2f}¢ | Stake: ${stake:.2f}\n"
-        f"ROI: {roi:.1%} | Q={quality:.0f} | {days}d left"
+        f"🎯 <b>MICRO {source.upper()}</b> [{mode}]\n\n"
+        f"{'✅' if side=='YES' else '❌'} {side} <b>{question[:80]}</b>\n"
+        f"📊 Вход: <b>{entry_price*100:.1f}¢</b> | Ставка: <b>${stake:.2f}</b>\n"
+        f"💹 ROI: {roi:.1%} | Q={quality:.0f} | {days}d left\n"
+        f"📉 Spread: {candidate.get('spread', 0)*100:.1f}¢ | SL: {'OFF' if float(days or 999) <= 3 else f'{sl_pct:.0%}'}\n"
+        f"💼 Банк: ${stats_now.get('bankroll', 0):.0f} | Открыто: {open_count+1}\n"
+        f"🔗 <a href='https://polymarket.com/event/{candidate.get('market_id', '')}'>Polymarket</a>"
     )
     return True
 
@@ -422,12 +439,30 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         )
         return  # skip this tick entirely, don't update DB with garbage
 
-    pnl_pct = (bid_price - entry_price) / entry_price
+    pnl_pct = (bid_price - entry_price) / entry_price if entry_price > 0 else 0
     pnl_dollar = pnl_pct * stake
 
     await db.update_position_price(pos["id"], bid_price, round(pnl_dollar, 4))
 
-    # ── Resolution WIN: our side price → 99¢+ (use bid for real exit price) ──
+    # ── Resolution: our side price → 99¢+ (WIN) or ≤1¢ (LOSS) ──
+    if bid_price <= 0.01:
+        pnl = -stake  # total loss
+        closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "resolved_loss")
+        if closed:
+            ws.unmark_position(ws_key)
+            await db.recalibrate_theme(pos.get("theme", "other"))
+            log.info(f"[RESOLVED] LOSS {side} '{pos['question'][:40]}' PnL: ${pnl:.2f}")
+            await db.log_event("CLOSE_RESOLVED", market_id, {
+                "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price, "result": "LOSS",
+            })
+            await tg.send(
+                f"🏁 <b>RESOLVED LOSS</b>\n"
+                f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
+                f"📊 Вход: {entry_price*100:.1f}¢ → {bid_price*100:.1f}¢\n"
+                f"💰 PnL: <b>${pnl:.2f}</b>"
+            )
+        return
+
     if bid_price >= CONFIG["RESOLUTION_PRICE"]:
         pnl = ((bid_price - entry_price) / entry_price) * stake
         closed = await db.close_position(pos["id"], round(pnl, 4), "WIN", "resolved")
@@ -435,11 +470,18 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             ws.unmark_position(ws_key)
             await db.recalibrate_theme(pos.get("theme", "other"))
             log.info(f"[RESOLVED] WIN {side} '{pos['question'][:40]}' PnL: +${pnl:.2f}")
+            hold_hours = _days_to_expiry_from_pos(pos, "opened_at")
             await db.log_event("CLOSE_RESOLVED", market_id, {
                 "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
+                "hold_hours": hold_hours, "theme": pos.get("theme"),
             })
+            stats_now = await db.get_stats()
             await tg.send(
-                f"<b>RESOLVED WIN</b> {side}\n{pos['question'][:60]}\nPnL: +${pnl:.2f}"
+                f"🏁 <b>RESOLVED WIN</b> ✅\n\n"
+                f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
+                f"📊 Вход: {entry_price*100:.1f}¢ → <b>{bid_price*100:.1f}¢</b>\n"
+                f"💰 PnL: <b>+${pnl:.2f}</b> ({pnl/stake*100:+.1f}%)\n"
+                f"⏱ Держали: {hold_hours:.0f}ч | 💼 Банк: ${stats_now.get('bankroll', 0):.0f}"
             )
         return
 
@@ -477,11 +519,14 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             )
             await db.log_event("CLOSE_SL", market_id, {
                 "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
+                "days_to_expiry": days_to_expiry, "theme": pos.get("theme"),
             })
             await tg.send(
-                f"<b>SL LOSS</b> {side}\n{pos['question'][:60]}\n"
-                f"Entry: {entry_price:.2f}¢ → {bid_price:.2f}¢\n"
-                f"PnL: ${pnl:.2f} ({pnl_pct:+.1%})"
+                f"🛑 <b>STOP LOSS</b>\n\n"
+                f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
+                f"📊 Вход: {entry_price*100:.1f}¢ → <b>{bid_price*100:.1f}¢</b>\n"
+                f"💰 PnL: <b>${pnl:.2f}</b> ({pnl_pct:+.1%})\n"
+                f"⏱ До expiry: {days_to_expiry:.1f}d"
             )
         return
 
