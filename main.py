@@ -74,6 +74,9 @@ log = logging.getLogger("micro")
 _shutdown = False
 _last_stake_warn = 0.0  # throttle "stake too small" warnings
 _http_client: httpx.AsyncClient | None = None
+_pos_cache: dict = {}  # ws_key -> position dict (in-memory cache to avoid DB reads on every WS tick)
+_pos_last_db_write: dict = {}  # pos_id -> timestamp of last DB price write
+_POS_DB_WRITE_INTERVAL = 30  # seconds between DB price writes per position
 
 
 def _handle_signal(sig, frame):
@@ -305,6 +308,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     # Register in WS for position monitoring
     ws_key = f"{market_id}_{side}"
     ws.mark_as_position(ws_key)
+    _pos_cache[ws_key] = pos  # populate in-memory cache
     if ws_key not in ws.prices:
         ws_token = candidate.get("ws_token")
         ws_side = candidate.get("ws_side", side.lower())
@@ -404,6 +408,12 @@ async def check_watchlist_price(ws_key: str, price: float, info: dict,
 
 # ── Position Monitoring ──
 
+def _invalidate_pos_cache(ws_key: str):
+    """Remove position from in-memory cache on close."""
+    pos = _pos_cache.pop(ws_key, None)
+    if pos:
+        _pos_last_db_write.pop(pos.get("id"), None)
+
 async def check_position_price(ws_key: str, price: float, info: dict,
                                 db: Database, ws: MicroWS, tg: TelegramBot):
     """WS callback: position price updated. Check SL/resolution."""
@@ -415,11 +425,15 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         return
     market_id, side = parts
 
-    pos = await db.get_open_position_by_market(market_id, side)
-
+    # Use in-memory cache to avoid DB read on every WS tick
+    pos = _pos_cache.get(ws_key)
     if not pos:
-        ws.unmark_position(ws_key)
-        return
+        pos = await db.get_open_position_by_market(market_id, side)
+        if not pos:
+            ws.unmark_position(ws_key)
+            _invalidate_pos_cache(ws_key)
+            return
+        _pos_cache[ws_key] = pos
 
     entry_price = pos["entry_price"]
     stake = pos["stake_amt"]
@@ -430,18 +444,23 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         bid_price = price
 
     # Sanity: for 90%+ entries, bid can't realistically drop >50% without resolution
-    # If bid_price is absurdly low, it's a bad WS tick — use last known good price or entry
     if bid_price < entry_price * 0.5:
         log.warning(
             f"[SANITY] {market_id[:8]} {side} bid={bid_price:.4f} << entry={entry_price:.4f} — "
-            f"ignoring bad tick (price={price:.4f}, best_bid={info.get('best_bid')}, best_ask={info.get('best_ask')})"
+            f"ignoring bad tick"
         )
-        return  # skip this tick entirely, don't update DB with garbage
+        return
 
     pnl_pct = (bid_price - entry_price) / entry_price if entry_price > 0 else 0
     pnl_dollar = pnl_pct * stake
 
-    await db.update_position_price(pos["id"], bid_price, round(pnl_dollar, 4))
+    # Throttle DB writes: only update every _POS_DB_WRITE_INTERVAL seconds per position
+    import time as _time
+    now_ts = _time.time()
+    last_write = _pos_last_db_write.get(pos["id"], 0)
+    if now_ts - last_write >= _POS_DB_WRITE_INTERVAL:
+        await db.update_position_price(pos["id"], bid_price, round(pnl_dollar, 4))
+        _pos_last_db_write[pos["id"]] = now_ts
 
     # ── Resolution: our side price → 99¢+ (WIN) or ≤1¢ (LOSS) ──
     if bid_price <= 0.01:
@@ -449,6 +468,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "resolved_loss")
         if closed:
             ws.unmark_position(ws_key)
+            _invalidate_pos_cache(ws_key)
             await db.recalibrate_theme(pos.get("theme", "other"))
             log.info(f"[RESOLVED] LOSS {side} '{pos['question'][:40]}' PnL: ${pnl:.2f}")
             await db.log_event("CLOSE_RESOLVED", market_id, {
@@ -467,6 +487,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         closed = await db.close_position(pos["id"], round(pnl, 4), "WIN", "resolved")
         if closed:
             ws.unmark_position(ws_key)
+            _invalidate_pos_cache(ws_key)
             await db.recalibrate_theme(pos.get("theme", "other"))
             log.info(f"[RESOLVED] WIN {side} '{pos['question'][:40]}' PnL: +${pnl:.2f}")
             hold_hours = _days_to_expiry_from_pos(pos, "opened_at")
@@ -510,6 +531,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "stop_loss")
         if closed:
             ws.unmark_position(ws_key)
+            _invalidate_pos_cache(ws_key)
             await db.recalibrate_theme(pos.get("theme", "other"))
             log.info(
                 f"[SL] LOSS {side} '{pos['question'][:40]}' @ {bid_price:.2f}¢ "
@@ -542,6 +564,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "rapid_drop")
         if closed:
             ws.unmark_position(ws_key)
+            _invalidate_pos_cache(ws_key)
             await db.recalibrate_theme(pos.get("theme", "other"))
             log.info(
                 f"[RAPID DROP] LOSS {side} '{pos['question'][:40]}' @ {bid_price:.2f}¢ "
@@ -595,6 +618,7 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
             side = pos["side"]
             ws_key = f"{pos['market_id']}_{side}"
             ws.unmark_position(ws_key)
+            _invalidate_pos_cache(ws_key)
             await db.recalibrate_theme(pos.get("theme", "other"))
             log.info(
                 f"[EXPIRED] {result} {side} '{pos['question'][:40]}' "
@@ -734,10 +758,11 @@ async def main():
                     entered += 1
                     await asyncio.sleep(0.5)
 
-            # 4. Watchlist (88-93¢) → register in WS for price monitoring
+            # 4. Watchlist (90-95¢) → register in WS for price monitoring
+            if watchlist:
+                await db.upsert_watchlist_batch(watchlist)
             new_ws = 0
             for c in watchlist:
-                await db.upsert_watchlist(c)
                 ws_key = f"{c['market_id']}_{c['side']}"
                 if ws_key not in ws.prices:
                     # ws_token already points to YES token (scanner fixed)

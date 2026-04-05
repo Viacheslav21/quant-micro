@@ -177,6 +177,36 @@ class Database:
                 market.get("yes_token"), market.get("no_token"),
             )
 
+    async def upsert_watchlist_batch(self, markets: list):
+        """Batch upsert watchlist items in a single transaction."""
+        if not markets:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.executemany("""
+                INSERT INTO micro_watchlist
+                    (market_id, side, question, theme, yes_price,
+                     volume, liquidity, spread, best_ask,
+                     days_left, end_date, roi, quality, yes_token, no_token)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                ON CONFLICT (market_id, side) DO UPDATE SET
+                    yes_price  = EXCLUDED.yes_price,
+                    volume     = EXCLUDED.volume,
+                    liquidity  = EXCLUDED.liquidity,
+                    spread     = EXCLUDED.spread,
+                    best_ask   = EXCLUDED.best_ask,
+                    days_left  = EXCLUDED.days_left,
+                    roi        = EXCLUDED.roi,
+                    quality    = EXCLUDED.quality,
+                    updated_at = NOW()
+            """, [(m["market_id"], m.get("side", "YES"),
+                   m["question"], m.get("theme", "other"),
+                   m.get("price", m.get("yes_price", 0)),
+                   m.get("volume", 0), m.get("liquidity", 0),
+                   m.get("spread", 0), m.get("best_ask", 0),
+                   m.get("days_left", 0), m.get("end_date"),
+                   m.get("roi", 0), m.get("quality", 0),
+                   m.get("yes_token"), m.get("no_token")) for m in markets])
+
     async def get_watchlist(self) -> list:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
