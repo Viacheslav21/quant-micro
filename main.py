@@ -77,6 +77,8 @@ _http_client: httpx.AsyncClient | None = None
 _pos_cache: dict = {}  # ws_key -> position dict (in-memory cache to avoid DB reads on every WS tick)
 _pos_last_db_write: dict = {}  # pos_id -> timestamp of last DB price write
 _POS_DB_WRITE_INTERVAL = 30  # seconds between DB price writes per position
+_sl_rest_cooldown: dict = {}  # market_id -> timestamp of last REST SL check
+_SL_REST_COOLDOWN = 60  # seconds between REST verifications per market for SL
 _last_scan_at = 0.0  # timestamp of last successful scan
 _scan_count_global = 0
 _WATCHDOG_STALE_SECONDS = 900  # 15 min
@@ -504,6 +506,12 @@ async def check_position_price(ws_key: str, price: float, info: dict,
     if pnl_pct <= -sl_pct and days_to_expiry > 3:
         # Only apply SL for markets >3 days out — near-expiry markets should ride to resolution
         # Verify via REST before closing — WS book can be stale/incomplete
+        # Rate limit: max 1 REST check per market per 60s (WS can fire dozens of ticks/sec)
+        now_ts = time.time()
+        last_check = _sl_rest_cooldown.get(market_id, 0)
+        if now_ts - last_check < _SL_REST_COOLDOWN:
+            return  # already checked recently, WS price likely stale — skip
+        _sl_rest_cooldown[market_id] = now_ts
         rest_price = await _verify_price_rest(market_id, side)
         if rest_price is not None:
             rest_pnl_pct = (rest_price - entry_price) / entry_price
@@ -546,7 +554,12 @@ async def check_position_price(ws_key: str, price: float, info: dict,
 
     # ── Rapid Drop Guard (7¢ — disabled for ≤3 days to expiry, let it resolve) ──
     if bid_price < entry_price - 0.07 and days_to_expiry > 3:
-        # Verify via REST before closing
+        # Verify via REST before closing (reuse SL cooldown to prevent spam)
+        now_ts = time.time()
+        last_check = _sl_rest_cooldown.get(market_id, 0)
+        if now_ts - last_check < _SL_REST_COOLDOWN:
+            return
+        _sl_rest_cooldown[market_id] = now_ts
         rest_price = await _verify_price_rest(market_id, side)
         if rest_price is not None and rest_price >= entry_price - 0.07:
             log.info(
@@ -782,6 +795,81 @@ async def main():
 
     _SCAN_TIMEOUT = 600  # 10 min max per scan cycle
 
+    async def _scan_cycle(scan_count, db, ws, tg, scanner):
+        """One full scan cycle — wrapped in wait_for for timeout."""
+        # 1. Expired positions (check every scan)
+        await check_expired_positions(db, ws, tg)
+
+        # 2. Fetch candidates
+        direct, watchlist = await scanner.fetch_candidates()
+
+        # 3. Direct entries (≥93¢)
+        entered = 0
+        for c in direct:
+            if _shutdown:
+                break
+            if await try_enter(c, db, ws, tg, source="scan"):
+                entered += 1
+                await asyncio.sleep(0.5)
+
+        # 4. Watchlist (90-95¢) → register in WS for price monitoring
+        if watchlist:
+            await db.upsert_watchlist_batch(watchlist)
+        new_ws = 0
+        for c in watchlist:
+            ws_key = f"{c['market_id']}_{c['side']}"
+            if ws_key not in ws.prices:
+                tokens = ws.register_market(
+                    ws_key,
+                    token_id=c.get("ws_token"),
+                    token_side=c.get("ws_side", c["side"].lower()),
+                    price=c["price"],
+                    question=c["question"],
+                    is_position=False,
+                )
+                if tokens:
+                    await ws.subscribe_tokens(tokens)
+                    new_ws += 1
+
+        # 5. Status
+        open_pos = await db.get_open_positions()
+        stats = await db.get_stats()
+        bankroll = stats.get("bankroll", CONFIG["BANKROLL"])
+        total_unrealized = sum(p.get("unrealized_pnl", 0) for p in open_pos)
+        equity = bankroll + total_unrealized
+        await db.update_peak_equity(equity)
+
+        log.info(
+            f"[SCAN #{scan_count}] Direct: {len(direct)} ({entered} entered) | "
+            f"WL: {len(watchlist)} ({new_ws} new WS) | Open: {len(open_pos)} | "
+            f"Bankroll: ${bankroll:.2f} | Equity: ${equity:.2f} | "
+            f"PnL: ${stats.get('total_pnl', 0):.2f} | "
+            f"W/L: {stats.get('wins', 0)}/{stats.get('losses', 0)}"
+        )
+
+        # 6. Cleanup stale WS (every 30 scans)
+        if scan_count % 30 == 0:
+            await db.cleanup_watchlist()
+            wl_data = await db.get_watchlist()
+            wl_ids = {w["market_id"] for w in wl_data}
+            pos_keys = {f"{p['market_id']}_{p['side']}" for p in open_pos}
+            to_remove = []
+            for ws_key in list(ws.prices.keys()):
+                market_id = ws_key.rsplit("_", 1)[0] if "_" in ws_key else ws_key
+                if market_id not in wl_ids and ws_key not in pos_keys:
+                    to_remove.append(ws_key)
+            for ws_key in to_remove:
+                tokens = ws.unregister_market(ws_key)
+                await ws.unsubscribe_tokens(tokens)
+            if to_remove:
+                log.info(f"[CLEANUP] Removed {len(to_remove)} stale WS entries")
+
+        await db.log_event("SCAN", details={
+            "scan": scan_count, "direct": len(direct), "entered": entered,
+            "watchlist": len(watchlist), "new_ws": new_ws,
+            "open": len(open_pos), "bankroll": round(bankroll, 2),
+        })
+
     scan_count = 0
 
     while not _shutdown:
@@ -789,88 +877,21 @@ async def main():
             scan_count += 1
             log.info(f"[SCAN #{scan_count}] Starting...")
 
-            async with asyncio.timeout(_SCAN_TIMEOUT):
-                # 1. Expired positions (check every scan)
-                await check_expired_positions(db, ws, tg)
-
-                # 2. Fetch candidates
-                direct, watchlist = await scanner.fetch_candidates()
-
-                # 3. Direct entries (≥93¢)
-                entered = 0
-                for c in direct:
-                    if _shutdown:
-                        break
-                    if await try_enter(c, db, ws, tg, source="scan"):
-                        entered += 1
-                        await asyncio.sleep(0.5)
-
-                # 4. Watchlist (90-95¢) → register in WS for price monitoring
-                if watchlist:
-                    await db.upsert_watchlist_batch(watchlist)
-                new_ws = 0
-                for c in watchlist:
-                    ws_key = f"{c['market_id']}_{c['side']}"
-                    if ws_key not in ws.prices:
-                        tokens = ws.register_market(
-                            ws_key,
-                            token_id=c.get("ws_token"),
-                            token_side=c.get("ws_side", c["side"].lower()),
-                            price=c["price"],
-                            question=c["question"],
-                            is_position=False,
-                        )
-                        if tokens:
-                            await ws.subscribe_tokens(tokens)
-                            new_ws += 1
-
-                # 5. Status
-                open_pos = await db.get_open_positions()
-                stats = await db.get_stats()
-                bankroll = stats.get("bankroll", CONFIG["BANKROLL"])
-                total_unrealized = sum(p.get("unrealized_pnl", 0) for p in open_pos)
-                equity = bankroll + total_unrealized
-                await db.update_peak_equity(equity)
-
-                log.info(
-                    f"[SCAN #{scan_count}] Direct: {len(direct)} ({entered} entered) | "
-                    f"WL: {len(watchlist)} ({new_ws} new WS) | Open: {len(open_pos)} | "
-                    f"Bankroll: ${bankroll:.2f} | Equity: ${equity:.2f} | "
-                    f"PnL: ${stats.get('total_pnl', 0):.2f} | "
-                    f"W/L: {stats.get('wins', 0)}/{stats.get('losses', 0)}"
-                )
-
-                # 6. Cleanup stale WS (every 30 scans)
-                if scan_count % 30 == 0:
-                    await db.cleanup_watchlist()
-                    wl_data = await db.get_watchlist()
-                    wl_ids = {w["market_id"] for w in wl_data}
-                    pos_keys = {f"{p['market_id']}_{p['side']}" for p in open_pos}
-                    to_remove = []
-                    for ws_key in list(ws.prices.keys()):
-                        market_id = ws_key.rsplit("_", 1)[0] if "_" in ws_key else ws_key
-                        if market_id not in wl_ids and ws_key not in pos_keys:
-                            to_remove.append(ws_key)
-                    for ws_key in to_remove:
-                        tokens = ws.unregister_market(ws_key)
-                        await ws.unsubscribe_tokens(tokens)
-                    if to_remove:
-                        log.info(f"[CLEANUP] Removed {len(to_remove)} stale WS entries")
-
-                await db.log_event("SCAN", details={
-                    "scan": scan_count, "direct": len(direct), "entered": entered,
-                    "watchlist": len(watchlist), "new_ws": new_ws,
-                    "open": len(open_pos), "bankroll": round(bankroll, 2),
-                })
+            await asyncio.wait_for(
+                _scan_cycle(scan_count, db, ws, tg, scanner),
+                timeout=_SCAN_TIMEOUT,
+            )
 
             _last_scan_at = time.time()
             _scan_count_global = scan_count
 
             await asyncio.sleep(CONFIG["SCAN_INTERVAL"])
 
-        except TimeoutError:
+        except asyncio.TimeoutError:
             log.error(f"[MAIN] Scan #{scan_count} timed out after {_SCAN_TIMEOUT}s!")
             await tg.send(f"⏰ <b>MICRO SCAN TIMEOUT</b>\nScan #{scan_count} exceeded {_SCAN_TIMEOUT}s")
+            _last_scan_at = time.time()
+            _scan_count_global = scan_count
             await asyncio.sleep(5)
         except Exception as e:
             log.error(f"[MAIN] Loop error: {e}", exc_info=True)
