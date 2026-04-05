@@ -200,19 +200,9 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     if is_risky_market(question, theme) and entry_price_check < 0.96:
         return False
 
-    if await db.has_position_on_market(market_id, side):
-        return False
-
-    # Theme auto-block: Bayesian calibration blocks themes with WR < 40% after 10+ trades
-    if await db.is_theme_blocked(theme):
-        return False
-
-    # Blacklist: never re-enter a market that hit SL or rapid drop
-    if await db.has_sl_loss(market_id, side):
-        return False
-
-    # Cooldown: don't re-enter markets recently closed
-    if await db.has_recent_close(market_id, side, hours=6):
+    # Combined entry check: duplicate, theme block, SL blacklist, cooldown — 1 query instead of 4
+    entry_check = await db.check_entry_allowed(market_id, side, theme)
+    if not entry_check["allowed"]:
         return False
 
     open_pos = await db.get_open_positions()

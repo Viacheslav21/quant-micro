@@ -385,6 +385,29 @@ class Database:
             """)
             log.debug(f"[DB] Watchlist cleanup: {deleted}")
 
+    async def check_entry_allowed(self, market_id: str, side: str, theme: str, cooldown_hours: float = 6) -> dict:
+        """Combined entry check — replaces 4 separate queries with 1.
+        Returns {allowed: bool, reason: str|None}."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT
+                    EXISTS(SELECT 1 FROM micro_positions WHERE market_id=$1 AND side=$2 AND status='open') as has_open,
+                    EXISTS(SELECT 1 FROM micro_positions WHERE market_id=$1 AND side=$2
+                           AND status='closed' AND close_reason IN ('stop_loss','rapid_drop')) as has_sl,
+                    EXISTS(SELECT 1 FROM micro_positions WHERE market_id=$1 AND side=$2
+                           AND status='closed' AND closed_at > NOW() - INTERVAL '1 hour' * $3) as has_recent,
+                    COALESCE((SELECT blocked FROM micro_theme_stats WHERE theme=$4), false) as theme_blocked
+            """, market_id, side, cooldown_hours, theme)
+            if row["has_open"]:
+                return {"allowed": False, "reason": "duplicate"}
+            if row["theme_blocked"]:
+                return {"allowed": False, "reason": "theme_blocked"}
+            if row["has_sl"]:
+                return {"allowed": False, "reason": "sl_blacklist"}
+            if row["has_recent"]:
+                return {"allowed": False, "reason": "recent_close"}
+            return {"allowed": True, "reason": None}
+
     async def has_position_on_market(self, market_id: str, side: str = None) -> bool:
         async with self.pool.acquire() as conn:
             if side:
