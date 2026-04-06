@@ -643,7 +643,7 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
 # ── Main Loop ──
 
 async def main():
-    global _shutdown, _http_client
+    global _shutdown, _http_client, _last_scan_at, _scan_count_global
 
     log.info("=" * 60)
     log.info("[MAIN] quant-micro v3 (resolution harvester)")
@@ -745,8 +745,11 @@ async def main():
     async def _watchdog():
         global _last_scan_at
         _last_scan_at = time.time()
+        log.info(f"[WATCHDOG] Started, _last_scan_at={_last_scan_at:.0f}")
         while not _shutdown:
             await asyncio.sleep(60)
+            age = int(time.time() - _last_scan_at)
+            log.debug(f"[WATCHDOG] Check: scan #{_scan_count_global}, age={age}s")
             if _last_scan_at and time.time() - _last_scan_at > _WATCHDOG_STALE_SECONDS:
                 stale_min = int((time.time() - _last_scan_at) / 60)
                 log.error(f"[WATCHDOG] Scan loop stale! Last scan {stale_min}m ago")
@@ -897,6 +900,7 @@ async def main():
         finally:
             _last_scan_at = time.time()
             _scan_count_global = scan_count
+            log.debug(f"[MAIN] Scan #{scan_count} done, watchdog reset (age=0s)")
 
     # ── Shutdown ──
 
