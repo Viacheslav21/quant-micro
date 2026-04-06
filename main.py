@@ -222,32 +222,8 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     bankroll = stats.get("bankroll", CONFIG["BANKROLL"])
     stake = calc_stake(bankroll)
 
-    # ── Correlation penalty: limit effective exposure per theme cluster ──
-    if theme_count > 0:
-        THEME_RHO = 0.5
-        theme_stake = sum(p.get("stake_amt", 0) for p in open_pos if p.get("theme") == theme)
-        n = theme_count
-        effective_n = n / (1 + (n - 1) * THEME_RHO)
-        stake_per_eff = theme_stake / effective_n if effective_n > 0 else theme_stake
-        max_allowed = bankroll * 0.05  # max 5% bankroll per effective independent bet
-
-        if stake_per_eff >= max_allowed:
-            log.debug(
-                f"[CORR] Theme '{theme}': {n} pos, ${theme_stake:.0f} staked, "
-                f"eff={effective_n:.1f}, per_eff=${stake_per_eff:.1f} ≥ max ${max_allowed:.1f} — skip"
-            )
-            return False
-
-        # Worst-case check: if all theme positions + new one hit SL simultaneously
-        sl_pct_est = 0.08  # approximate average SL
-        worst_case = (theme_stake + stake) * sl_pct_est
-        max_loss = bankroll * 0.15  # max 15% bankroll loss from one theme cluster
-        if worst_case > max_loss:
-            log.debug(
-                f"[CORR] Theme '{theme}': worst-case SL -${worst_case:.1f} > "
-                f"15% bankroll ${max_loss:.1f} — skip"
-            )
-            return False
+    # Correlation penalty removed for micro — negRisk event buckets are anti-correlated
+    # (max 1 loses out of N). Risk is managed by MAX_PER_THEME + MAX_OPEN + SL.
 
     if stake < CONFIG["MIN_STAKE"]:
         now = time.time()
@@ -640,6 +616,68 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
             )
 
 
+async def check_event_cascade(scanner, db: Database, ws, tg, source="cascade"):
+    """Event cascade: when a market in a negRisk event resolves YES (price ≥99¢),
+    all sibling markets resolve NO. Enter NO on siblings at good prices.
+    This is nearly risk-free: the event outcome is already determined."""
+    if not scanner.event_siblings:
+        return 0
+
+    entered = 0
+    for neg_risk_id, siblings in scanner.event_siblings.items():
+        # Check if any sibling resolved YES (yes_price ≥ 99¢)
+        resolved_yes = [s for s in siblings if s["yes_price"] >= 0.99]
+        if not resolved_yes:
+            continue
+
+        # Found a resolution — enter NO on all others that haven't resolved yet
+        for s in siblings:
+            if s["yes_price"] >= 0.99 or s["yes_price"] <= 0.01:
+                continue  # already resolved
+            no_price = s["no_price"]
+            if no_price < 0.93 or no_price >= 0.995:
+                continue  # too cheap or already at resolution
+
+            days_left = 0.5  # resolving now, estimate
+            end_str = s.get("end_date")
+            if end_str:
+                try:
+                    end = datetime.fromisoformat(str(end_str).replace("Z", "+00:00"))
+                    days_left = max(0, (end - datetime.now(timezone.utc)).total_seconds() / 86400)
+                except Exception:
+                    pass
+
+            candidate = {
+                "market_id": s["market_id"],
+                "slug": s.get("slug", ""),
+                "question": s["question"],
+                "theme": s["theme"],
+                "side": "NO",
+                "price": no_price,
+                "best_ask": no_price,
+                "volume": s["volume"],
+                "liquidity": s["volume"],  # approximation
+                "spread": s["spread"],
+                "days_left": days_left,
+                "end_date": end_str,
+                "roi": round((1.0 - no_price) / no_price, 4) if no_price > 0 else 0,
+                "quality": 95,  # high quality — event is resolving
+                "yes_token": s["yes_token"],
+                "no_token": s["no_token"],
+                "ws_token": s["yes_token"],  # always subscribe to YES token
+                "ws_side": "no",
+            }
+
+            if await try_enter(candidate, db, ws, tg, source=source):
+                entered += 1
+                log.info(
+                    f"[CASCADE] Entered NO {s['question'][:50]} @ {no_price*100:.1f}¢ "
+                    f"(sibling resolved YES in event {neg_risk_id[:8]})"
+                )
+
+    return entered
+
+
 # ── Main Loop ──
 
 async def main():
@@ -815,6 +853,10 @@ async def main():
                 entered += 1
                 await asyncio.sleep(0.5)
 
+        # 3b. Event cascade: enter NO on siblings of resolved markets
+        cascade_entered = await check_event_cascade(scanner, db, ws, tg)
+        entered += cascade_entered
+
         # 4. Watchlist (90-95¢) → register in WS for price monitoring
         if watchlist:
             await db.upsert_watchlist_batch(watchlist)
@@ -843,8 +885,8 @@ async def main():
         await db.update_peak_equity(equity)
 
         log.info(
-            f"[SCAN #{scan_count}] Direct: {len(direct)} ({entered} entered) | "
-            f"WL: {len(watchlist)} ({new_ws} new WS) | Open: {len(open_pos)} | "
+            f"[SCAN #{scan_count}] Direct: {len(direct)} ({entered} entered, {cascade_entered} cascade) | "
+            f"WL: {len(watchlist)} ({new_ws} new WS) | Events: {len(scanner.event_siblings)} | Open: {len(open_pos)} | "
             f"Bankroll: ${bankroll:.2f} | Equity: ${equity:.2f} | "
             f"PnL: ${stats.get('total_pnl', 0):.2f} | "
             f"W/L: {stats.get('wins', 0)}/{stats.get('losses', 0)}"

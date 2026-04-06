@@ -224,6 +224,8 @@ class MicroScanner:
         self.config = config
         self.client = httpx.AsyncClient(timeout=15.0)
         self._pages = int(config.get("SCAN_PAGES", 16))  # 1600 markets max
+        # Event cascade: negRiskMarketID → list of sibling market info
+        self.event_siblings: dict[str, list[dict]] = {}
 
     async def fetch_candidates(self) -> tuple[list, list]:
         """Returns (direct_entries, watchlist).
@@ -263,6 +265,39 @@ class MicroScanner:
                     continue
                 batch = r.json() or []
                 all_markets.extend(batch)
+
+            # Build event siblings map (negRisk events: one YES → all others NO)
+            _event_map: dict[str, list[dict]] = {}
+            for m in all_markets:
+                neg_risk_id = m.get("negRiskMarketID") or ""
+                if neg_risk_id:
+                    raw_p = m.get("outcomePrices")
+                    if raw_p:
+                        if isinstance(raw_p, str):
+                            raw_p = _json.loads(raw_p)
+                        _event_map.setdefault(neg_risk_id, []).append({
+                            "market_id": str(m["id"]),
+                            "question": m.get("question", ""),
+                            "yes_price": float(raw_p[0]),
+                            "no_price": float(raw_p[1]) if len(raw_p) > 1 else round(1.0 - float(raw_p[0]), 4),
+                            "yes_token": None,  # filled below if needed
+                            "no_token": None,
+                            "spread": float(m.get("spread") or 0),
+                            "volume": float(m.get("volume") or 0),
+                            "theme": classify_theme(m.get("question", "")),
+                            "slug": (m.get("events") or [{}])[0].get("slug", "") if m.get("events") else m.get("slug", ""),
+                            "end_date": m.get("endDate") or m.get("endDateIso"),
+                            "neg_risk_id": neg_risk_id,
+                            "_raw_m": m,  # keep for token parsing
+                        })
+            # Parse tokens for event siblings
+            for siblings in _event_map.values():
+                for s in siblings:
+                    raw_m = s.pop("_raw_m")
+                    yt, nt = _parse_token_ids(raw_m)
+                    s["yes_token"] = yt
+                    s["no_token"] = nt
+            self.event_siblings = _event_map
 
             for m in all_markets:
                 vol = float(m.get("volume") or 0)
