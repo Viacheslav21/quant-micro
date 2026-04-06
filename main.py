@@ -44,7 +44,7 @@ CONFIG = {
     "SL_PCT":             float(os.getenv("SL_PCT", "0.05")),        # 5% default
     "ENTRY_MIN_PRICE":    float(os.getenv("ENTRY_MIN_PRICE", "0.94")), # 94¢ direct entry (was 95¢)
     "WATCHLIST_MIN_PRICE": float(os.getenv("WATCHLIST_MIN_PRICE", "0.90")), # 90¢ watchlist (was 88¢)
-    "MAX_DAYS_LEFT":      float(os.getenv("MAX_DAYS_LEFT", "10")),   # 10 days — parse dates from questions
+    "MAX_DAYS_LEFT":      float(os.getenv("MAX_DAYS_LEFT", "7")),    # 7 days max (was 10 — too much volatility)
     "MIN_ROI":            float(os.getenv("MIN_ROI", "0.02")),       # 2% min ROI (1% too thin — $0 PnL on 99¢ entries)
     "MIN_LIQUIDITY_MULT": float(os.getenv("MIN_LIQUIDITY_MULT", "100")),  # was 500 — too strict for $50 stakes
     "MAX_SPREAD":         float(os.getenv("MAX_SPREAD", "0.02")),    # 2¢ tight spread
