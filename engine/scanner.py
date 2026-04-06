@@ -10,36 +10,82 @@ log = logging.getLogger("micro.scanner")
 GAMMA_API = "https://gamma-api.polymarket.com"
 
 THEME_KEYWORDS = {
-    "crypto":      ["bitcoin", "btc", "ethereum", "eth", "crypto", "solana", "sol", "xrp", "dogecoin",
-                    "defi", "nft", "token", "blockchain", "megaeth", "polymarket"],
-    "politics":    ["trump", "biden", "election", "president", "congress", "senate", "governor",
-                    "democrat", "republican", "gop", "parliament", "prime minister", "party win"],
-    "iran":        ["iran", "tehran", "khamenei", "hormuz", "persian gulf", "enrichment", "nuclear deal"],
-    "israel":      ["israel", "idf", "hamas", "hezbollah", "houthi", "dimona", "gaza", "netanyahu"],
-    "military":    ["military", "strike", "ceasefire", "invasion", "troops", "airstrike", "missile",
-                    "evacuate", "embassy", "nato", "war ", "peace deal"],
-    "fed":         ["fed ", "interest rate", "fomc", "federal reserve", "rate cut", "rate hike"],
-    "economy":     ["gdp", "inflation", "recession", "unemployment", "cpi", "jobs"],
-    "tech":        ["apple", "google", "meta", "microsoft", "nvidia", "openai", "ai ", "deepseek",
-                    "chatgpt", "gemini", "released", "launch"],
-    "sports":      ["nba", "nfl", "mlb", "ufc", "premier league", "champions league", "world cup",
-                    "ncaa", "tournament", "match", "game ", "score", "winner", "playoff",
-                    "real madrid", "barcelona", "lakers", "celtics",
-                    "northern ireland", "republic of ireland", "scotland", "wales", "england ",
-                    "nations league", "euro 2", "world cup qualif", "friendly match",
-                    "fifa", "uefa", "concacaf", "conmebol"],
-    "esports":     ["esports", "counter-strike", "dota", "league of legends", "valorant",
-                    "semperfi", "fnatic", "navi", "faze", " vs ", "mongolz", "blast open"],
-    "geopolitics": ["russia", "ukraine", "china", "taiwan", "sanctions", "pakistan", "afghanistan",
-                    "qatar", "kuwait", "uae", "saudi"],
-    "spacex":      ["spacex", "starship", "rocket", "nasa"],
-    "markets":     ["s&p", "spy", "nasdaq", "dow jones", "gold", "oil", "commodities", "crude"],
-    "celeb":       ["elon", "musk", "kanye", "celebrity", "bitboy"],
-    "social":      ["tweet", "post", "mention", "x.com", "twitter"],
+    # Geopolitics & conflicts
+    "iran":       ["iran","iranian","tehran","nuclear iran","iaea","persian gulf","strait of hormuz",
+                   "khamenei","enrichment","nuclear deal"],
+    "israel":     ["israel","hamas","gaza","hezbollah","netanyahu","idf","west bank","golan","dimona"],
+    "ukraine":    ["ukraine","zelensky","donbas","crimea","kherson","zaporizhzhia"],
+    "russia":     ["russia","putin","kremlin","moscow","wagner","navalny"],
+    "china":      ["china","taiwan","beijing","xi jinping","south china sea","ccp","uyghur"],
+    "war":        ["war","attack","strike","invasion","missile","nuclear","military","troops","bomb",
+                   "drone","ceasefire","peace deal","airstrike","evacuate"],
+    "peace":      ["peace","deal","agreement","surrender","truce","negotiations","treaty"],
+    "yemen":      ["yemen","houthi","aden","sanaa"],
+
+    # US Politics
+    "trump":      ["trump","executive order","tariff","maga","mar-a-lago","trumps"],
+    "election":   ["election","vote","president","referendum","governor","mayor","minister","parliament",
+                   "primary","caucus","midterm","ballot","polling","swing state","electoral",
+                   "presidential","nominee","running mate","party win","fidesz","tisza",
+                   "democrat","republican","gop","congress","senate"],
+    "usgov":      ["doge","government shutdown","federal budget","pentagon","cia","fbi","doj",
+                   "secretary of state","cabinet","impeach","pardon","classified","dhs"],
+
+    # Commodities & markets
+    "oil":        ["oil","opec","crude","brent","wti","petroleum","natural gas","lng"],
+    "gold":       ["gold","xau","precious metal","silver","platinum"],
+    "crypto":     ["bitcoin","btc","crypto","ethereum","eth","solana","sol","dogecoin","doge","xrp",
+                   "ripple","cardano","polkadot","avalanche","chainlink","defi","nft","stablecoin",
+                   "binance","coinbase","memecoin","altcoin","megaeth","microstrategy"],
+    "stocks":     ["s&p","sp500","spx","nasdaq","dow jones","russell","stock market","ipo","earnings",
+                   "market cap","fdv","bull market","bear market"],
+
+    # Economy & macro
+    "fed":        ["federal reserve","powell","rate cut","rate hike","interest rate","fomc",
+                   "monetary policy","fed chair","bank of england","ecb"],
+    "economy":    ["gdp","inflation","recession","unemployment","cpi","jobs","nonfarm","payroll",
+                   "consumer spending","retail sales","housing","mortgage","trade balance"],
+
+    # Tech & science
+    "tech":       ["ai ","artificial intelligence","openai","anthropic","google","apple","nvidia",
+                   "tesla","microsoft","meta","amazon","semiconductor","chip","quantum","robotics",
+                   "chatgpt","gemini","claude","deepseek"],
+    "space":      ["nasa","spacex","rocket","satellite","mars","moon","orbit","launch","starship",
+                   "blue origin","artemis"],
+    "musk":       ["elon musk","musk","tweet","twitter","x.com"],
+    "social":     ["followers","tiktok","instagram","youtube","subscribers","views","downloads",
+                   "mrbeast","mr beast","streamer","influencer","viral"],
+
+    # Sports & esports (risky themes — used by is_risky_market)
+    "sports":     ["nba","nfl","mlb","ufc","premier league","champions league","world cup",
+                   "ncaa","tournament","match","game ","score","winner","playoff",
+                   "masters","pga","golf","tennis","boxing","formula 1","f1 ",
+                   "real madrid","barcelona","lakers","celtics",
+                   "nations league","fifa","uefa","concacaf","conmebol"],
+    "esports":    ["esports","counter-strike","dota","league of legends","valorant",
+                   "fnatic","navi","faze"," vs ","mongolz","blast open","pgl"],
+
+    # Society
+    "health":     ["covid","pandemic","vaccine","fda","who ","disease","outbreak",
+                   "bird flu","h5n1","monkeypox","drug","pharma"],
+    "climate":    ["climate","hurricane","earthquake","wildfire","flood","weather","tornado",
+                   "temperature","emissions","carbon"],
+    "legal":      ["court","ruling","lawsuit","indictment","trial","verdict","conviction",
+                   "acquittal","sentence","extradition","arrest","charged"],
+    "film":       ["box office","movie","film","oscar","opening weekend",
+                   "grammy","emmy","golden globe","netflix","disney","streaming"],
+
+    # Regions
+    "europe":     ["eu ","european","macron","scholz","starmer","brexit","ecb",
+                   "germany","france","uk ","britain","italy","spain","poland","hungarian"],
+    "latam":      ["brazil","lula","mexico","argentina","milei","venezuela","maduro",
+                   "colombia","peru","chile","bolivia","ecuador","cuba","peruvian"],
+    "africa":     ["africa","nigeria","south africa","kenya","ethiopia","egypt","morocco"],
+    "mideast":    ["saudi","mbs","qatar","uae","emirates","bahrain","oman","iraq","baghdad"],
 }
 
 # Themes with ALWAYS-risky gap risk (sports scores, esports matches)
-RISKY_THEMES = {"sports", "esports", "israel", "military"}
+RISKY_THEMES = {"sports", "esports", "israel", "war"}
 
 # Question patterns that indicate volatile/unpredictable outcomes
 # These are risky regardless of theme — price can gap from 95¢ to 0¢
