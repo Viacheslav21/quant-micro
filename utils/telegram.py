@@ -9,8 +9,8 @@ def _escape_question(text: str) -> str:
     """Escape HTML in user-generated content (market questions) while keeping our tags."""
     # Split on our known tags, escape everything else
     import re
-    parts = re.split(r'(</?(?:b|i|code)>)', text)
-    return "".join(p if re.match(r'</?(?:b|i|code)>$', p) else html.escape(p) for p in parts)
+    parts = re.split(r'(</?(?:b|i|code|a)(?: [^>]*)?>)', text)
+    return "".join(p if re.match(r'</?(?:b|i|code|a)(?: [^>]*)?>$', p) else html.escape(p) for p in parts)
 
 
 class TelegramBot:
@@ -33,7 +33,10 @@ class TelegramBot:
         except Exception as e:
             log.warning(f"[TG] HTML send failed: {e}, trying plain text")
             try:
-                plain = text.replace("<b>", "").replace("</b>", "")
+                import re as _re
+                plain = _re.sub(r'<a [^>]*>', '', text)
+                plain = plain.replace("</a>", "")
+                plain = plain.replace("<b>", "").replace("</b>", "")
                 plain = plain.replace("<i>", "").replace("</i>", "")
                 plain = plain.replace("<code>", "").replace("</code>", "")
                 await self.client.post(

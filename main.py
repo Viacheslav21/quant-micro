@@ -335,7 +335,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     stats_now = await db.get_stats()
     open_count = len(await db.get_open_positions())
     await tg.send(
-        f"🎯 <b>MICRO {source.upper()}</b> [{mode}]\n\n"
+        f"🔬 <b>MICRO | {source.upper()}</b> [{mode}]\n\n"
         f"{'✅' if side=='YES' else '❌'} {side} <b>{question[:80]}</b>\n"
         f"📊 Вход: <b>{entry_price*100:.1f}¢</b> | Ставка: <b>${stake:.2f}</b>\n"
         f"💹 ROI: {roi:.1%} | Q={quality:.0f} | {days}d left\n"
@@ -470,7 +470,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
                 "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price, "result": "LOSS",
             })
             await tg.send(
-                f"🏁 <b>RESOLVED LOSS</b>\n"
+                f"🔬 <b>MICRO</b> | 🏁 <b>RESOLVED LOSS</b>\n"
                 f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
                 f"📊 Вход: {entry_price*100:.1f}¢ → {bid_price*100:.1f}¢\n"
                 f"💰 PnL: <b>${pnl:.2f}</b>"
@@ -492,7 +492,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             })
             stats_now = await db.get_stats()
             await tg.send(
-                f"🏁 <b>RESOLVED WIN</b> ✅\n\n"
+                f"🔬 <b>MICRO</b> | 🏁 <b>RESOLVED WIN</b> ✅\n\n"
                 f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
                 f"📊 Вход: {entry_price*100:.1f}¢ → <b>{bid_price*100:.1f}¢</b>\n"
                 f"💰 PnL: <b>+${pnl:.2f}</b> ({pnl/stake*100:+.1f}%)\n"
@@ -544,7 +544,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
                 "days_to_expiry": days_to_expiry, "theme": pos.get("theme"),
             })
             await tg.send(
-                f"🛑 <b>STOP LOSS</b>\n\n"
+                f"🔬 <b>MICRO</b> | 🛑 <b>STOP LOSS</b>\n\n"
                 f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
                 f"📊 Вход: {entry_price*100:.1f}¢ → <b>{bid_price*100:.1f}¢</b>\n"
                 f"💰 PnL: <b>${pnl:.2f}</b> ({pnl_pct:+.1%})\n"
@@ -580,7 +580,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
                 "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
             })
             await tg.send(
-                f"<b>RAPID DROP</b> {side}\n{pos['question'][:60]}\n"
+                f"🔬 <b>MICRO</b> | <b>RAPID DROP</b> {side}\n{pos['question'][:60]}\n"
                 f"Entry: {entry_price:.2f}¢ → {bid_price:.2f}¢\n"
                 f"PnL: ${pnl:.2f} ({pnl_pct:+.1%})"
             )
@@ -635,7 +635,7 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
                 "exit": current_price, "hours_past_expiry": round(hours_past, 1),
             })
             await tg.send(
-                f"<b>EXPIRED {result}</b> {side}\n{pos['question'][:60]}\n"
+                f"🔬 <b>MICRO</b> | <b>EXPIRED {result}</b> {side}\n{pos['question'][:60]}\n"
                 f"PnL: ${pnl:.2f} | {hours_past:.0f}h past expiry"
             )
 
