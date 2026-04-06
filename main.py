@@ -38,7 +38,7 @@ CONFIG = {
     "BANKROLL":           float(os.getenv("BANKROLL", "500")),
     "SIMULATION":         os.getenv("SIMULATION", "true").lower() == "true",
     "SCAN_INTERVAL":      int(os.getenv("SCAN_INTERVAL", "120")),
-    "MAX_STAKE":          float(os.getenv("MAX_STAKE", "50.0")),      # $50 max
+    "MAX_STAKE":          float(os.getenv("MAX_STAKE", "20.0")),      # $20 max (was $50 — reduce risk until 50+ trades)
     "MIN_STAKE":          float(os.getenv("MIN_STAKE", "5.0")),
     "MAX_OPEN":           int(os.getenv("MAX_OPEN", "50")),
     "SL_PCT":             float(os.getenv("SL_PCT", "0.05")),        # 5% default
