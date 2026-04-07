@@ -76,6 +76,16 @@ Polymarket API → Scanner (every 2 min, 1600 markets max)
 
 ### Configuration
 
+Config loaded from environment variables at startup, then overridden at runtime by `config_live` DB table. `_reload_config()` merges DB overrides into the `CONFIG` dict (safe keys only, never credentials). Triggered instantly via `LISTEN config_reload` channel. 15 micro parameters exposed for live editing:
+- **Filters**: `ENTRY_MIN_PRICE`, `WATCHLIST_MIN_PRICE`, `MIN_ROI`, `MIN_QUALITY_SCORE`, `MAX_DAYS_LEFT`, `MIN_VOLUME`
+- **Risk**: `SL_PCT`, `RAPID_DROP_PCT`, `MAX_LOSS_PER_POS`
+- **Sizing**: `MAX_STAKE`, `MIN_STAKE`
+- **Capacity**: `MAX_OPEN`, `MAX_PER_THEME`
+- **Timing**: `SCAN_INTERVAL`
+- **General**: `CONFIG_TAG`
+
+Config A/B comparison table is shown on the dashboard's scalping page.
+
 All config via environment variables:
 - `SIMULATION=true` (default, no real trades)
 - `SCAN_INTERVAL=120` (seconds between REST scans)
