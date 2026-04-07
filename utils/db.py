@@ -8,6 +8,17 @@ import asyncpg
 log = logging.getLogger("micro.db")
 
 
+def _cast_config_value(value: str, value_type: str):
+    """Cast config string value to its proper Python type."""
+    if value_type == "float":
+        return float(value)
+    elif value_type == "int":
+        return int(float(value))
+    elif value_type == "bool":
+        return value.lower() in ("true", "1", "yes")
+    return value
+
+
 class Database:
     def __init__(self):
         self.url = os.getenv("DATABASE_URL")
@@ -145,6 +156,17 @@ class Database:
             except Exception as e:
                 log.warning(f"[DB] Watchlist side migration: {e}")
         log.info("[DB] Schema ready")
+
+    async def get_config_overrides(self, service: str) -> dict:
+        """Fetch live config overrides from config_live table (owned by engine)."""
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT key, value, value_type FROM config_live WHERE service = $1", service
+                )
+            return {r["key"]: _cast_config_value(r["value"], r["value_type"]) for r in rows}
+        except Exception:
+            return {}  # table may not exist yet if engine hasn't started
 
     # ── Watchlist ──
 

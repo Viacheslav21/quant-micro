@@ -84,6 +84,28 @@ _last_scan_at = 0.0  # timestamp of last successful scan
 _scan_count_global = 0
 _WATCHDOG_STALE_SECONDS = 900  # 15 min
 
+_SAFE_CONFIG_KEYS = {
+    "ENTRY_MIN_PRICE", "WATCHLIST_MIN_PRICE", "MIN_ROI", "MIN_QUALITY_SCORE",
+    "SL_PCT", "RAPID_DROP_PCT", "MAX_LOSS_PER_POS",
+    "MAX_STAKE", "MIN_STAKE", "MAX_OPEN", "MAX_PER_THEME",
+    "MAX_DAYS_LEFT", "MIN_VOLUME", "SCAN_INTERVAL", "CONFIG_TAG",
+}
+
+
+async def _reload_config(db):
+    """Fetch live config overrides from DB and merge into CONFIG."""
+    try:
+        overrides = await db.get_config_overrides("micro")
+        changed = []
+        for key, val in overrides.items():
+            if key in _SAFE_CONFIG_KEYS and key in CONFIG and CONFIG[key] != val:
+                changed.append(f"{key}: {CONFIG[key]}→{val}")
+                CONFIG[key] = val
+        if changed:
+            log.info(f"[CONFIG] Live reload: {', '.join(changed)}")
+    except Exception as e:
+        log.warning(f"[CONFIG] Failed to reload: {e}")
+
 
 def _handle_signal(sig, frame):
     global _shutdown
@@ -954,9 +976,27 @@ async def main():
 
     scan_count = 0
 
+    # LISTEN for config_reload NOTIFY — instant config updates from dashboard
+    async def _listen_config():
+        try:
+            import asyncpg as _apg
+            _listen_conn = await _apg.connect(db.url)
+            await _listen_conn.add_listener("config_reload",
+                lambda conn, pid, channel, payload:
+                    asyncio.create_task(_reload_config(db)))
+            await _listen_conn.execute("LISTEN config_reload")
+            log.info("[CONFIG] LISTEN config_reload active")
+            while not _shutdown:
+                await asyncio.sleep(60)
+            await _listen_conn.close()
+        except Exception as e:
+            log.warning(f"[CONFIG] LISTEN setup failed: {e}")
+    asyncio.create_task(_listen_config())
+
     while not _shutdown:
         try:
             scan_count += 1
+
             log.info(f"[SCAN #{scan_count}] Starting...")
 
             await asyncio.wait_for(
