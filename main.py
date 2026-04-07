@@ -49,11 +49,12 @@ CONFIG = {
     "MIN_LIQUIDITY_MULT": float(os.getenv("MIN_LIQUIDITY_MULT", "100")),  # was 500 — too strict for $50 stakes
     "MAX_SPREAD":         float(os.getenv("MAX_SPREAD", "0.02")),    # 2¢ tight spread
     "RESOLUTION_PRICE":   float(os.getenv("RESOLUTION_PRICE", "0.99")),
+    "MAX_LOSS_PER_POS":   float(os.getenv("MAX_LOSS_PER_POS", "3.0")),  # hard cap $3 loss per position, always enforced
     "MAX_PER_THEME":      int(os.getenv("MAX_PER_THEME", "5")),     # limit correlated risk
     "CONFIG_TAG":         os.getenv("CONFIG_TAG", "micro-v4"),
     "SCAN_PAGES":         int(os.getenv("SCAN_PAGES", "16")),        # 1600 markets
     "MIN_VOLUME":         float(os.getenv("MIN_VOLUME", "50000")),   # 50k volume
-    "MIN_QUALITY_SCORE":  float(os.getenv("MIN_QUALITY_SCORE", "25")), # quality gate (was 35)
+    "MIN_QUALITY_SCORE":  float(os.getenv("MIN_QUALITY_SCORE", "40")), # quality gate (was 25 — Q<40 had 0% WR, -$9.28)
 }
 
 # ── Logging ──
@@ -476,10 +477,46 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             )
         return
 
-    # ── Stop Loss (disabled for markets ≤3 days to expiry — let them resolve) ──
-    # Data: resolved=100% WR, SL=0% WR. SL kills positions that would have resolved correctly.
+    # ── Hard max loss cap — ALWAYS enforced, even when SL is disabled ──
+    # Prevents one bad trade from wiping all profits (iran loss: -$9.28 erased 41 wins)
+    dollar_loss = pnl_pct * stake
+    max_loss = CONFIG["MAX_LOSS_PER_POS"]
+    if dollar_loss <= -max_loss:
+        # Verify via REST first
+        now_ts = time.time()
+        last_check = _sl_rest_cooldown.get(market_id, 0)
+        if now_ts - last_check < _SL_REST_COOLDOWN:
+            return
+        _sl_rest_cooldown[market_id] = now_ts
+        rest_price = await _verify_price_rest(market_id, side)
+        if rest_price is not None:
+            rest_pnl = ((rest_price - entry_price) / entry_price) * stake
+            if rest_pnl > -max_loss:
+                log.info(f"[MAX LOSS BLOCKED] {market_id[:8]} WS loss=${dollar_loss:.2f} but REST=${rest_pnl:.2f} — not real")
+                return
+        pnl = dollar_loss
+        closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "max_loss")
+        if closed:
+            ws.unmark_position(ws_key)
+            _invalidate_pos_cache(ws_key)
+            await db.recalibrate_theme(pos.get("theme", "other"))
+            log.info(f"[MAX LOSS] {side} '{pos['question'][:40]}' loss=${pnl:.2f} > cap ${max_loss}")
+            await db.log_event("CLOSE_MAX_LOSS", market_id, {
+                "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
+                "max_loss_cap": max_loss,
+            })
+            await tg.send(
+                f"🔬 <b>MICRO</b> | 🚨 <b>MAX LOSS CAP</b>\n\n"
+                f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
+                f"📊 Вход: {entry_price*100:.1f}¢ → <b>{bid_price*100:.1f}¢</b>\n"
+                f"💰 PnL: <b>${pnl:.2f}</b> (cap: ${max_loss})"
+            )
+        return
+
+    # ── Stop Loss (disabled for markets ≤1 day to expiry — let them resolve) ──
+    # Was ≤3d but iran loss happened in that window. Narrowed to ≤1d.
     days_to_expiry = _days_to_expiry(pos)
-    if pnl_pct <= -sl_pct and days_to_expiry > 3:
+    if pnl_pct <= -sl_pct and days_to_expiry > 1:
         # Only apply SL for markets >3 days out — near-expiry markets should ride to resolution
         # Verify via REST before closing — WS book can be stale/incomplete
         # Rate limit: max 1 REST check per market per 60s (WS can fire dozens of ticks/sec)
@@ -528,8 +565,8 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             )
         return
 
-    # ── Rapid Drop Guard (7¢ — disabled for ≤3 days to expiry, let it resolve) ──
-    if bid_price < entry_price - 0.07 and days_to_expiry > 3:
+    # ── Rapid Drop Guard (7¢ — disabled for ≤1 day to expiry, let it resolve) ──
+    if bid_price < entry_price - 0.07 and days_to_expiry > 1:
         # Verify via REST before closing (reuse SL cooldown to prevent spam)
         now_ts = time.time()
         last_check = _sl_rest_cooldown.get(market_id, 0)

@@ -10,6 +10,21 @@ log = logging.getLogger("micro.scanner")
 GAMMA_API = "https://gamma-api.polymarket.com"
 
 THEME_KEYWORDS = {
+    # Sports & esports FIRST — must match before "war" catches "strike" or generic " vs "
+    "sports":     ["nba","nfl","mlb","ufc","premier league","champions league","world cup",
+                   "ncaa","tournament","match","game ","score","winner","playoff",
+                   "masters","pga","golf","tennis","boxing","formula 1","f1 ",
+                   "real madrid","barcelona","lakers","celtics","brewers","red sox","yankees",
+                   "nations league","fifa","uefa","concacaf","conmebol",
+                   "clay court","linz","monza","open:","oxford united","fc win",
+                   "o/u 2.5","o/u 3.5","o/u 1.5","games total",
+                   "ducks","rockets","pioneers","monkey king","beijing ducks","nanjing"],
+    "esports":    ["esports","counter-strike","dota","league of legends","valorant",
+                   "fnatic","navi","faze","mongolz","blast open","pgl bucharest","pgl ",
+                   "parivision","fut esports","b8 vs","3dmax","fokus vs","wildcard",
+                   "astralis","bc.game","voca","map 1 winner","map 2 winner","map 3 winner",
+                   "(bo3)","(bo5)","(bo1)"],
+
     # Geopolitics & conflicts
     "iran":       ["iran","iranian","tehran","nuclear iran","iaea","persian gulf","strait of hormuz",
                    "khamenei","enrichment","nuclear deal"],
@@ -17,7 +32,7 @@ THEME_KEYWORDS = {
     "ukraine":    ["ukraine","zelensky","donbas","crimea","kherson","zaporizhzhia"],
     "russia":     ["russia","putin","kremlin","moscow","wagner","navalny"],
     "china":      ["china","taiwan","beijing","xi jinping","south china sea","ccp","uyghur"],
-    "war":        ["war","attack","strike","invasion","missile","nuclear","military","troops","bomb",
+    "war":        ["war ","attack","invasion","missile","nuclear","military","troops","bomb",
                    "drone","ceasefire","peace deal","airstrike","evacuate"],
     "peace":      ["peace","deal","agreement","surrender","truce","negotiations","treaty"],
     "yemen":      ["yemen","houthi","aden","sanaa"],
@@ -55,15 +70,6 @@ THEME_KEYWORDS = {
     "musk":       ["elon musk","musk","tweet","twitter","x.com"],
     "social":     ["followers","tiktok","instagram","youtube","subscribers","views","downloads",
                    "mrbeast","mr beast","streamer","influencer","viral"],
-
-    # Sports & esports (risky themes — used by is_risky_market)
-    "sports":     ["nba","nfl","mlb","ufc","premier league","champions league","world cup",
-                   "ncaa","tournament","match","game ","score","winner","playoff",
-                   "masters","pga","golf","tennis","boxing","formula 1","f1 ",
-                   "real madrid","barcelona","lakers","celtics",
-                   "nations league","fifa","uefa","concacaf","conmebol"],
-    "esports":    ["esports","counter-strike","dota","league of legends","valorant",
-                   "fnatic","navi","faze"," vs ","mongolz","blast open","pgl"],
 
     # Society
     "health":     ["covid","pandemic","vaccine","fda","who ","disease","outbreak",

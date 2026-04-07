@@ -45,7 +45,7 @@ Polymarket API → Scanner (every 2 min, 1600 markets max)
 ### Module Responsibilities
 
 - **main.py** (~830 lines) — Orchestrator. Quality-gated entry with combined DB check (1 query replaces 4: duplicate, theme block, SL blacklist, cooldown). Dynamic SL (7-10%, disabled ≤3d to expiry, 60s REST cooldown per market to prevent spam), rapid-drop guard (7¢, also disabled ≤3d), REST price verification before SL/rapid-drop exits, expired position auto-close (24h past expiry). In-memory position cache avoids DB reads on every WS tick. DB write throttle (30s per position). Risky market exception for ≥96¢. Batch watchlist upserts. WS callbacks + scan loop every 2 min (wrapped in `asyncio.wait_for(600s)` timeout). Event cascade: `check_event_cascade()` detects negRisk YES resolution and enters NO on sibling markets. Watchdog tracks `_last_scan_at` globally with debug logging. Telegram messages prefixed with "MICRO |". Graceful shutdown on SIGTERM/SIGINT.
-- **engine/scanner.py** (~400 lines) — Fetches up to 1600 markets from Gamma API (16 pages). Filters: volume >$50k, spread <2¢, price in 90-97¢ zone, ≤7 days to expiry. Risky theme exclusion (sports, esports, israel, war — 4 themes). 21 risky pattern regexes (price bets, vs matches, counting, weather). Both YES and NO sides checked. Quality scoring (0-100). Theme classification (~30 themes, expanded to match engine). Date parsing from question text with year-rollover handling. Event siblings map for negRisk cascade (maps negRiskMarketID to sibling market IDs). Telegram links use slug instead of market_id for correct Polymarket URLs.
+- **engine/scanner.py** (~400 lines) — Fetches up to 1600 markets from Gamma API (16 pages). Filters: volume >$50k, spread <2¢, price in 90-97¢ zone, ≤7 days to expiry. Risky theme exclusion (sports, esports, israel, war — 4 themes). 21 risky pattern regexes (price bets, vs matches, counting, weather). Both YES and NO sides checked. Quality scoring (0-100). Theme classification (~30 themes, sports/esports checked FIRST to prevent misclassification by generic war/china keywords). Date parsing from question text with year-rollover handling. Event siblings map for negRisk cascade (maps negRiskMarketID to sibling market IDs). Telegram links use slug instead of market_id for correct Polymarket URLs.
 - **engine/ws_client.py** (~320 lines) — Polymarket WebSocket client. Dual-purpose: watchlist price-up detection + position SL/resolution monitoring. One token can serve multiple ws_keys (YES + NO sides). Bid-price based exit pricing. Auto-reconnect with exponential backoff, heartbeat, batch subscribe/unsubscribe.
 - **utils/db.py** (~520 lines) — PostgreSQL with 5 tables: micro_watchlist (composite PK: market_id + side, quality score), micro_positions (with end_date for expiry tracking), micro_stats, micro_log, micro_theme_stats (Bayesian per-theme calibration with auto-block). SL blacklist (has_sl_loss). Recent close cooldown (has_recent_close). Atomic close (WHERE status='open' RETURNING id). Auto-migrations for schema changes.
 - **utils/telegram.py** (~47 lines) — Async Telegram notifications with HTML escaping (preserves `<a>`, `<b>`, `<i>`, `<code>` tags) and plain text fallback.
@@ -53,7 +53,7 @@ Polymarket API → Scanner (every 2 min, 1600 markets max)
 ### Key Algorithms
 
 - **Risky Market Filter**: Excludes themes (sports, esports, israel, war) and 21 question patterns (price bets, vs matches, counting, weather) that have high gap risk. Exception: markets ≥96¢ bypass risky filter.
-- **Quality Scoring**: 0-100 score based on price (higher=better), spread (tighter=better), days_left (closer=better), volume (higher=better). Minimum score 25 to enter.
+- **Quality Scoring**: 0-100 score based on price (higher=better), spread (tighter=better), days_left (closer=better), volume (higher=better). Minimum score 40 to enter (Q<40 had 0% WR in audit).
 - **Entry Logic**: Buy YES/NO at best_ask price. Stake = 5% of bankroll, min $5, max $20. ROI at resolution must be ≥2%.
 - **Dynamic SL**: ≤12h left → 10%, ≤1d → 9%, ≤2d → 8%, >2d → 7%. Wide enough to survive normal fluctuations — audit showed 0% WR on old tight SL.
 - **SL Blacklist**: After a stop loss or rapid drop on a market, never re-enter that market+side. Prevents repeat losers.
@@ -90,7 +90,7 @@ All config via environment variables:
 - `MIN_VOLUME=50000`, `MIN_LIQUIDITY_MULT=100`, `MAX_SPREAD=0.02` (market filters)
 - `MAX_PER_THEME=5` (theme concentration limit)
 - `SCAN_PAGES=16` (1600 markets scanned)
-- `MIN_QUALITY_SCORE=25` (minimum quality to enter)
+- `MIN_QUALITY_SCORE=40` (minimum quality to enter — Q<40 had 0% WR)
 - `CONFIG_TAG=micro-v4`
 
 ### Risk Management
