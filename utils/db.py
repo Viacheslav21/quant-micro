@@ -268,26 +268,21 @@ class Database:
             )
 
     async def save_position_and_deduct(self, pos: dict, stake: float):
-        """Save position + deduct stake atomically in one transaction."""
+        """Save position. Bankroll computed from positions, no separate stats update needed."""
         async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute("""
-                    INSERT INTO micro_positions
-                        (id, market_id, question, theme, side, entry_price,
-                         current_price, stake_amt, tp_pct, sl_pct, config_tag, end_date)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-                """,
-                    pos["id"], pos["market_id"], pos["question"],
-                    pos.get("theme", "other"), pos["side"], pos["entry_price"],
-                    pos["entry_price"], pos["stake_amt"],
-                    pos.get("tp_pct", 0.05), pos.get("sl_pct", 0.05),
-                    pos.get("config_tag", "micro-v3"),
-                    pos.get("end_date"),
-                )
-                await conn.execute(
-                    "UPDATE micro_stats SET bankroll = bankroll - $1, updated_at = NOW() WHERE id = 1",
-                    stake,
-                )
+            await conn.execute("""
+                INSERT INTO micro_positions
+                    (id, market_id, question, theme, side, entry_price,
+                     current_price, stake_amt, tp_pct, sl_pct, config_tag, end_date)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+            """,
+                pos["id"], pos["market_id"], pos["question"],
+                pos.get("theme", "other"), pos["side"], pos["entry_price"],
+                pos["entry_price"], pos["stake_amt"],
+                pos.get("tp_pct", 0.05), pos.get("sl_pct", 0.05),
+                pos.get("config_tag", "micro-v3"),
+                pos.get("end_date"),
+            )
 
     async def get_open_position_by_market(self, market_id: str, side: str) -> Optional[dict]:
         """Fast single-position lookup for WS callbacks (avoids full table scan)."""
@@ -306,31 +301,16 @@ class Database:
             return [dict(r) for r in rows]
 
     async def close_position(self, pos_id: str, pnl: float, result: str, reason: str) -> bool:
-        """Atomic close with race protection. Returns stake + pnl to bankroll.
-        Wrapped in a transaction so position close + bankroll update are all-or-nothing."""
+        """Atomic close with race protection."""
         async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                row = await conn.fetchrow("""
-                    UPDATE micro_positions
-                    SET status = 'closed', pnl = $2, result = $3, close_reason = $4,
-                        closed_at = NOW()
-                    WHERE id = $1 AND status = 'open'
-                    RETURNING id, stake_amt
-                """, pos_id, pnl, result, reason)
-                if row:
-                    stake = row["stake_amt"]
-                    await conn.execute("""
-                        UPDATE micro_stats SET
-                            bankroll     = bankroll + $1 + $2,
-                            total_pnl    = total_pnl + $2,
-                            wins         = wins + CASE WHEN $3 = 'WIN' THEN 1 ELSE 0 END,
-                            losses       = losses + CASE WHEN $3 = 'LOSS' THEN 1 ELSE 0 END,
-                            total_trades = total_trades + 1,
-                            updated_at   = NOW()
-                        WHERE id = 1
-                    """, stake, pnl, result)
-                    return True
-                return False
+            row = await conn.fetchrow("""
+                UPDATE micro_positions
+                SET status = 'closed', pnl = $2, result = $3, close_reason = $4,
+                    closed_at = NOW()
+                WHERE id = $1 AND status = 'open'
+                RETURNING id
+            """, pos_id, pnl, result, reason)
+            return row is not None
 
     async def update_position_price(self, pos_id: str, price: float, unrealized_pnl: float):
         async with self.pool.acquire() as conn:
@@ -340,48 +320,40 @@ class Database:
                 WHERE id = $1 AND status = 'open'
             """, pos_id, price, unrealized_pnl)
 
-    # ── Stats ──
+    # ── Stats (computed from positions) ──
 
-    async def deduct_stake(self, stake: float):
+    async def get_stats(self, starting_bankroll: float = 500.0) -> dict:
+        """Compute stats live from micro_positions. No separate stats table needed."""
         async with self.pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE micro_stats SET bankroll = bankroll - $1, updated_at = NOW() WHERE id = 1",
-                stake,
+            row = await conn.fetchrow("""
+                SELECT
+                    COALESCE(SUM(pnl), 0) as total_pnl,
+                    SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN result='LOSS' THEN 1 ELSE 0 END) as losses,
+                    COUNT(*) as total_trades,
+                    COALESCE(SUM(stake_amt), 0) as open_staked
+                FROM micro_positions WHERE status='closed'
+            """)
+            open_staked = await conn.fetchval(
+                "SELECT COALESCE(SUM(stake_amt), 0) FROM micro_positions WHERE status='open'"
             )
+        total_pnl = float(row["total_pnl"])
+        return {
+            "bankroll": round(starting_bankroll + total_pnl - float(open_staked), 2),
+            "total_pnl": round(total_pnl, 2),
+            "wins": int(row["wins"]),
+            "losses": int(row["losses"]),
+            "total_trades": int(row["total_trades"]),
+            "peak_equity": 0,  # tracked in memory by main.py
+        }
 
-    async def get_stats(self) -> dict:
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM micro_stats WHERE id = 1")
-            return dict(row) if row else {"bankroll": 500, "total_pnl": 0, "wins": 0, "losses": 0}
-
-    async def update_peak_equity(self, equity: float):
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-                UPDATE micro_stats
-                SET peak_equity = GREATEST(peak_equity, $1), updated_at = NOW()
-                WHERE id = 1
-            """, equity)
-
-    async def set_bankroll(self, bankroll: float):
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE micro_stats SET bankroll = $1, updated_at = NOW() WHERE id = 1",
-                bankroll,
-            )
-
-    async def reset_stats(self, bankroll: float):
-        """Full reset: close all positions, clear stats, clear watchlist, clear log."""
+    async def reset_stats(self):
+        """Full reset: clear all positions, watchlist, log."""
         async with self.pool.acquire() as conn:
             await conn.execute("DELETE FROM micro_positions")
             await conn.execute("DELETE FROM micro_watchlist")
             await conn.execute("DELETE FROM micro_log")
-            await conn.execute("""
-                UPDATE micro_stats SET
-                    bankroll = $1, total_pnl = 0, wins = 0, losses = 0,
-                    total_trades = 0, peak_equity = $1, updated_at = NOW()
-                WHERE id = 1
-            """, bankroll)
-        log.info(f"[DB] Full reset: bankroll=${bankroll}, all positions/watchlist/log cleared")
+        log.info("[DB] Full reset: all positions/watchlist/log cleared")
 
     # ── Logging ──
 

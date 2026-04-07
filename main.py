@@ -82,6 +82,7 @@ _sl_rest_cooldown: dict = {}  # market_id -> timestamp of last REST SL check
 _SL_REST_COOLDOWN = 60  # seconds between REST verifications per market for SL
 _last_scan_at = 0.0  # timestamp of last successful scan
 _scan_count_global = 0
+_peak_equity = 0.0  # tracked in memory (was in micro_stats)
 _WATCHDOG_STALE_SECONDS = 900  # 15 min
 
 _SAFE_CONFIG_KEYS = {
@@ -241,7 +242,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     if theme_count >= CONFIG["MAX_PER_THEME"]:
         return False
 
-    stats = await db.get_stats()
+    stats = await db.get_stats(CONFIG["BANKROLL"])
     bankroll = stats.get("bankroll", CONFIG["BANKROLL"])
     stake = calc_stake(bankroll)
 
@@ -331,7 +332,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         "spread": candidate.get("spread", 0), "source": source, "mode": mode,
     })
 
-    stats_now = await db.get_stats()
+    stats_now = await db.get_stats(CONFIG["BANKROLL"])
     open_count = len(await db.get_open_positions())
     await tg.send(
         f"🔬 <b>MICRO | {source.upper()}</b> [{mode}]\n\n"
@@ -489,7 +490,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
                 "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
                 "hold_hours": hold_hours, "theme": pos.get("theme"),
             })
-            stats_now = await db.get_stats()
+            stats_now = await db.get_stats(CONFIG["BANKROLL"])
             await tg.send(
                 f"🔬 <b>MICRO</b> | 🏁 <b>RESOLVED WIN</b> ✅\n\n"
                 f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
@@ -937,11 +938,13 @@ async def main():
 
         # 5. Status
         open_pos = await db.get_open_positions()
-        stats = await db.get_stats()
+        global _peak_equity
+        stats = await db.get_stats(CONFIG["BANKROLL"])
         bankroll = stats.get("bankroll", CONFIG["BANKROLL"])
         total_unrealized = sum(p.get("unrealized_pnl", 0) for p in open_pos)
         equity = bankroll + total_unrealized
-        await db.update_peak_equity(equity)
+        if equity > _peak_equity:
+            _peak_equity = equity
 
         log.info(
             f"[SCAN #{scan_count}] Direct: {len(direct)} ({entered} entered, {cascade_entered} cascade) | "
