@@ -640,8 +640,8 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
             continue
 
         hours_past = (now - end).total_seconds() / 3600
-        if hours_past < 24:
-            continue  # give 24h grace period for delayed resolution
+        if hours_past < 72:
+            continue  # give 72h grace period for delayed resolution
 
         # Position is 24h+ past expiry — force close
         entry_price = pos["entry_price"]
