@@ -761,7 +761,7 @@ async def main():
     # ── Fresh start: reset all stats, positions, watchlist ──
     RESET_ON_START = os.getenv("RESET_ON_START", "false").lower() == "true"
     if RESET_ON_START:
-        await db.reset_stats(CONFIG["BANKROLL"])
+        await db.reset_stats()
         log.info(f"[MAIN] RESET: clean slate, bankroll=${CONFIG['BANKROLL']}")
 
     tg = TelegramBot(CONFIG["TELEGRAM_TOKEN"], CONFIG["TELEGRAM_CHAT_ID"])

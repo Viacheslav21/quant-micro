@@ -77,33 +77,8 @@ class Database:
                     closed_at    TIMESTAMPTZ
                 );
 
-                CREATE TABLE IF NOT EXISTS micro_stats (
-                    id           INTEGER PRIMARY KEY DEFAULT 1,
-                    bankroll     REAL NOT NULL DEFAULT 500,
-                    total_pnl    REAL DEFAULT 0,
-                    wins         INTEGER DEFAULT 0,
-                    losses       INTEGER DEFAULT 0,
-                    total_trades INTEGER DEFAULT 0,
-                    peak_equity  REAL DEFAULT 0,
-                    updated_at   TIMESTAMPTZ DEFAULT NOW()
-                );
-
-                CREATE TABLE IF NOT EXISTS micro_log (
-                    id           BIGSERIAL PRIMARY KEY,
-                    event_type   TEXT NOT NULL,
-                    market_id    TEXT,
-                    details      JSONB DEFAULT '{}',
-                    created_at   TIMESTAMPTZ DEFAULT NOW()
-                );
-
                 CREATE TABLE IF NOT EXISTS micro_theme_stats (
                     theme        TEXT PRIMARY KEY,
-                    trades       INTEGER DEFAULT 0,
-                    wins         INTEGER DEFAULT 0,
-                    losses       INTEGER DEFAULT 0,
-                    total_pnl    REAL DEFAULT 0,
-                    raw_wr       REAL DEFAULT 0.5,
-                    adj_wr       REAL DEFAULT 0.5,
                     blocked      BOOLEAN DEFAULT FALSE,
                     updated_at   TIMESTAMPTZ DEFAULT NOW()
                 );
@@ -114,14 +89,9 @@ class Database:
                     ON micro_positions(market_id);
                 CREATE INDEX IF NOT EXISTS idx_micro_pos_market_side_status
                     ON micro_positions(market_id, side, status);
-                CREATE INDEX IF NOT EXISTS idx_micro_log_type
-                    ON micro_log(event_type, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_micro_watchlist_price
                     ON micro_watchlist(yes_price DESC);
 
-                INSERT INTO micro_stats (id, bankroll)
-                VALUES (1, 500)
-                ON CONFLICT (id) DO NOTHING;
             """)
             # Migrations — add new columns
             for col, typ, default in [
@@ -155,6 +125,9 @@ class Database:
                     log.info("[DB] Migrated micro_watchlist: added side column + composite PK")
             except Exception as e:
                 log.warning(f"[DB] Watchlist side migration: {e}")
+            # Migration: drop unused columns from micro_theme_stats
+            for col in ["trades", "wins", "losses", "total_pnl", "raw_wr", "adj_wr"]:
+                await conn.execute(f"ALTER TABLE micro_theme_stats DROP COLUMN IF EXISTS {col}")
         log.info("[DB] Schema ready")
 
     async def get_config_overrides(self, service: str) -> dict:
@@ -348,24 +321,15 @@ class Database:
         }
 
     async def reset_stats(self):
-        """Full reset: clear all positions, watchlist, log."""
+        """Full reset: clear all positions and watchlist."""
         async with self.pool.acquire() as conn:
             await conn.execute("DELETE FROM micro_positions")
             await conn.execute("DELETE FROM micro_watchlist")
-            await conn.execute("DELETE FROM micro_log")
-        log.info("[DB] Full reset: all positions/watchlist/log cleared")
-
-    # ── Logging ──
+        log.info("[DB] Full reset: all positions/watchlist cleared")
 
     async def log_event(self, event_type: str, market_id: str = None, details: dict = None):
-        try:
-            async with self.pool.acquire() as conn:
-                await conn.execute(
-                    "INSERT INTO micro_log (event_type, market_id, details) VALUES ($1, $2, $3)",
-                    event_type, market_id, json.dumps(details or {}),
-                )
-        except Exception as e:
-            log.warning(f"[DB] log_event failed: {e}")
+        """No-op — micro_log table removed."""
+        pass
 
     # ── Cleanup ──
 
@@ -423,23 +387,17 @@ class Database:
     BLOCK_MIN_TRADES = 10  # need 10+ trades before blocking
 
     async def recalibrate_theme(self, theme: str):
-        """Recalculate theme stats from closed positions using Bayesian shrinkage."""
+        """Recalculate theme block status from closed positions using Bayesian shrinkage."""
         async with self.pool.acquire() as conn:
-            # Theme stats
             row = await conn.fetchrow("""
                 SELECT COUNT(*) as n,
-                       SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins,
-                       SUM(CASE WHEN result = 'LOSS' THEN 1 ELSE 0 END) as losses,
-                       COALESCE(SUM(pnl), 0) as total_pnl
+                       SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins
                 FROM micro_positions WHERE theme = $1 AND status = 'closed'
             """, theme)
             n = row["n"] or 0
             wins = row["wins"] or 0
-            losses = row["losses"] or 0
-            total_pnl = row["total_pnl"] or 0
             raw_wr = wins / n if n > 0 else 0.5
 
-            # Global stats for shrinkage
             g = await conn.fetchrow("""
                 SELECT COUNT(*) as n,
                        SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins
@@ -447,24 +405,20 @@ class Database:
             """)
             global_wr = (g["wins"] or 0) / (g["n"] or 1)
 
-            # Bayesian shrinkage: pull toward global mean
             adj_wr = (n * raw_wr + self.SHRINKAGE_K * global_wr) / (n + self.SHRINKAGE_K)
             blocked = n >= self.BLOCK_MIN_TRADES and adj_wr < self.BLOCK_WR_THRESHOLD
 
             await conn.execute("""
-                INSERT INTO micro_theme_stats (theme, trades, wins, losses, total_pnl, raw_wr, adj_wr, blocked, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-                ON CONFLICT (theme) DO UPDATE SET
-                    trades = $2, wins = $3, losses = $4, total_pnl = $5,
-                    raw_wr = $6, adj_wr = $7, blocked = $8, updated_at = NOW()
-            """, theme, n, wins, losses, total_pnl, round(raw_wr, 4), round(adj_wr, 4), blocked)
+                INSERT INTO micro_theme_stats (theme, blocked, updated_at)
+                VALUES ($1, $2, NOW())
+                ON CONFLICT (theme) DO UPDATE SET blocked = $2, updated_at = NOW()
+            """, theme, blocked)
 
             if blocked:
                 log.info(f"[THEME] BLOCKED '{theme}': {wins}/{n} WR={adj_wr:.1%} (raw={raw_wr:.1%})")
             return blocked
 
     async def is_theme_blocked(self, theme: str) -> bool:
-        """Check if theme is blocked due to poor performance."""
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT blocked FROM micro_theme_stats WHERE theme = $1", theme
@@ -472,8 +426,21 @@ class Database:
             return row["blocked"] if row else False
 
     async def get_theme_stats(self) -> list:
+        """Theme stats computed from positions + blocked flag from micro_theme_stats."""
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch("SELECT * FROM micro_theme_stats ORDER BY adj_wr DESC")
+            rows = await conn.fetch("""
+                SELECT p.theme,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN p.result='WIN' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN p.result='LOSS' THEN 1 ELSE 0 END) as losses,
+                    ROUND(SUM(p.pnl)::numeric, 2) as total_pnl,
+                    COALESCE(t.blocked, false) as blocked
+                FROM micro_positions p
+                LEFT JOIN micro_theme_stats t ON p.theme = t.theme
+                WHERE p.status = 'closed' AND p.theme IS NOT NULL
+                GROUP BY p.theme, t.blocked
+                ORDER BY COUNT(*) DESC
+            """)
             return [dict(r) for r in rows]
 
     async def has_sl_loss(self, market_id: str, side: str = None) -> bool:
