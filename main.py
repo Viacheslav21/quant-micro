@@ -825,6 +825,9 @@ async def main():
 
     ws_task = asyncio.create_task(ws.connect())
 
+    # Load config overrides from DB at startup
+    await _reload_config(db)
+
     await db.log_event("STARTUP", details={
         "config": {k: v for k, v in CONFIG.items() if k not in ("TELEGRAM_TOKEN",)},
         "open_positions": len(open_pos),
