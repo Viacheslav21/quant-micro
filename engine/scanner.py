@@ -416,6 +416,8 @@ class MicroScanner:
 
                 if days_left < 0:
                     skipped_no_date += 1
+                    if yes_price >= 0.90 or no_price >= 0.90:
+                        log.info(f"[NO-DATE] {question[:60]} | YES={yes_price:.2f} NO={no_price:.2f}")
                     continue
                 if days_left > max_days:
                     continue
