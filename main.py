@@ -229,29 +229,26 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     # Combined entry check: duplicate, theme block, SL blacklist, cooldown, negRisk group
     entry_check = await db.check_entry_allowed(market_id, side, theme, neg_risk_id=neg_risk_id)
     if not entry_check["allowed"]:
-        return False
+        return entry_check["reason"]  # "duplicate", "theme_blocked", "sl_blacklist", "recent_close", "neg_risk_group"
 
     open_pos = await db.get_open_positions()
     if len(open_pos) >= CONFIG["MAX_OPEN"]:
-        return False
+        return "max_open"
 
     theme_count = sum(1 for p in open_pos if p.get("theme") == theme)
     if theme_count >= CONFIG["MAX_PER_THEME"]:
-        return False
+        return "theme_limit"
 
     stats = await db.get_stats(CONFIG["BANKROLL"])
     bankroll = stats.get("bankroll", CONFIG["BANKROLL"])
     stake = calc_stake(bankroll)
-
-    # Correlation penalty removed for micro — negRisk event buckets are anti-correlated
-    # (max 1 loses out of N). Risk is managed by MAX_PER_THEME + MAX_OPEN + SL.
 
     if stake < CONFIG["MIN_STAKE"]:
         now = time.time()
         if now - _last_stake_warn > 300:  # warn at most every 5 min
             log.warning(f"[ENTRY] Bankroll ${bankroll:.2f} too low for MIN_STAKE ${CONFIG['MIN_STAKE']}")
             _last_stake_warn = now
-        return False
+        return "low_bankroll"
 
     entry_price = candidate.get("best_ask") or candidate["price"]
     if entry_price <= 0:
@@ -259,12 +256,12 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
 
     roi = (1.0 - entry_price) / entry_price
     if roi < CONFIG["MIN_ROI"]:
-        return False
+        return "low_roi"
 
     # Quality gate
     quality = candidate.get("quality", 0)
     if quality < CONFIG["MIN_QUALITY_SCORE"]:
-        return False
+        return "low_quality"
 
     # ── Dynamic SL: wide enough to survive normal fluctuations ──
     # Audit showed 0% WR on SL exits — old 3% was too tight, killed positions before resolution
@@ -398,8 +395,8 @@ async def check_watchlist_price(ws_key: str, price: float, info: dict,
         "neg_risk_id": wl.get("neg_risk_id"),
     }
 
-    entered = await try_enter(candidate, db, ws, tg, source="ws")
-    if entered:
+    result = await try_enter(candidate, db, ws, tg, source="ws")
+    if result is True:
         log.info(f"[WS→ENTRY] {side} hit {price:.2f}¢ on '{info.get('question', '')[:40]}'")
 
 
@@ -752,7 +749,7 @@ async def check_event_cascade(scanner, db: Database, ws, tg, source="cascade"):
                 "neg_risk_id": neg_risk_id,
             }
 
-            if await try_enter(candidate, db, ws, tg, source=source):
+            if (await try_enter(candidate, db, ws, tg, source=source)) is True:
                 entered += 1
                 log.info(
                     f"[CASCADE] Entered NO {s['question'][:50]} @ {no_price*100:.1f}¢ "
@@ -940,13 +937,17 @@ async def main():
         # 2. Fetch candidates
         direct, watchlist = await scanner.fetch_candidates()
 
-        # 3. Direct entries (≥93¢)
+        # 3. Direct entries
         entered = 0
+        _skip = {}
         for c in direct:
             if _shutdown:
                 break
-            if await try_enter(c, db, ws, tg, source="scan"):
+            result = await try_enter(c, db, ws, tg, source="scan")
+            if result is True:
                 entered += 1
+            elif isinstance(result, str):
+                _skip[result] = _skip.get(result, 0) + 1
 
         # 3b. Event cascade: enter NO on siblings of resolved markets
         cascade_entered = await check_event_cascade(scanner, db, ws, tg)
@@ -981,12 +982,13 @@ async def main():
         if equity > _peak_equity:
             _peak_equity = equity
 
+        skip_str = " | Skip: " + ", ".join(f"{k}={v}" for k, v in sorted(_skip.items())) if _skip else ""
         log.info(
             f"[SCAN #{scan_count}] Direct: {len(direct)} ({entered} entered, {cascade_entered} cascade) | "
             f"WL: {len(watchlist)} ({new_ws} new WS) | Events: {len(scanner.event_siblings)} | Open: {len(open_pos)} | "
             f"Bankroll: ${bankroll:.2f} | Equity: ${equity:.2f} | "
             f"PnL: ${stats.get('total_pnl', 0):.2f} | "
-            f"W/L: {stats.get('wins', 0)}/{stats.get('losses', 0)}"
+            f"W/L: {stats.get('wins', 0)}/{stats.get('losses', 0)}{skip_str}"
         )
 
         # 6. Cleanup stale WS (every 30 scans)
