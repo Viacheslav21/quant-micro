@@ -616,16 +616,28 @@ async def check_position_price(ws_key: str, price: float, info: dict,
 # ── Time-based Exit Check ──
 
 async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
-    """Check all open positions via REST: resolved → proper payout, 72h past expiry → force close."""
+    """Check expired positions via REST: resolved → proper payout, 72h past expiry → force close."""
     open_pos = await db.get_open_positions()
     now = datetime.now(timezone.utc)
 
     for pos in open_pos:
+        # Only check positions past their end_date
+        end_date_str = pos.get("end_date")
+        if not end_date_str:
+            continue
+        try:
+            end = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if now < end:
+            continue  # not expired yet — skip
+
         market_id = pos["market_id"]
         side = pos["side"]
         entry_price = pos["entry_price"]
         stake = pos["stake_amt"]
         ws_key = f"{market_id}_{side}"
+        hours_past = (now - end).total_seconds() / 3600
 
         # 1. Check resolution via REST API
         try:
@@ -634,9 +646,27 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
             if resp.status_code == 200:
                 mdata = resp.json()
                 if mdata.get("closed") or mdata.get("resolved"):
-                    outcome = (mdata.get("outcome") or "").lower()
-                    won = (side == "YES" and outcome in ("yes", "y", "1", "true")) or \
-                          (side == "NO" and outcome in ("no", "n", "0", "false"))
+                    # Determine winner from resolved prices (more reliable than outcome field)
+                    yes_p = float(mdata.get("outcomePrices", mdata.get("yes_price", 0)) or 0) if not isinstance(mdata.get("outcomePrices"), str) else 0
+                    no_p = 0
+                    try:
+                        # outcomePrices is typically a JSON string like "[1.0, 0.0]" or a list
+                        op = mdata.get("outcomePrices")
+                        if isinstance(op, str):
+                            import json as _json
+                            prices = _json.loads(op)
+                            yes_p = float(prices[0]) if prices else 0
+                            no_p = float(prices[1]) if len(prices) > 1 else 1 - yes_p
+                        elif isinstance(op, list):
+                            yes_p = float(op[0]) if op else 0
+                            no_p = float(op[1]) if len(op) > 1 else 1 - yes_p
+                        else:
+                            yes_p = float(mdata.get("yes_price", 0) or 0)
+                            no_p = float(mdata.get("no_price", 0) or 0)
+                    except Exception:
+                        yes_p = float(mdata.get("yes_price", 0) or 0)
+                        no_p = float(mdata.get("no_price", 0) or 0)
+                    won = (side == "YES" and yes_p > 0.9) or (side == "NO" and no_p > 0.9)
                     pnl = ((1.0 - entry_price) / entry_price) * stake if won else -stake
                     result = "WIN" if won else "LOSS"
                     closed = await db.close_position(pos["id"], round(pnl, 4), result, "resolved")
@@ -644,7 +674,7 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
                         ws.unmark_position(ws_key)
                         _invalidate_pos_cache(ws_key)
                         await db.recalibrate_theme(pos.get("theme", "other"))
-                        log.info(f"[RESOLVED] {result} {side} '{pos['question'][:40]}' outcome={outcome} PnL: ${pnl:.2f}")
+                        log.info(f"[RESOLVED] {result} {side} '{pos['question'][:40]}' yes_p={yes_p:.2f} no_p={no_p:.2f} PnL: ${pnl:.2f}")
                         await tg.send(
                             f"🔬 <b>MICRO</b> | 🏁 <b>RESOLVED {result}</b> {'✅' if won else '❌'}\n"
                             f"{pos['question'][:60]}\n"
@@ -655,14 +685,6 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
             log.debug(f"[RESOLVE] REST check failed {market_id[:8]}: {e}")
 
         # 2. Force-close if 72h+ past expiry
-        end_date_str = pos.get("end_date")
-        if not end_date_str:
-            continue
-        try:
-            end = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
-        except Exception:
-            continue
-        hours_past = (now - end).total_seconds() / 3600
         if hours_past < 72:
             continue
 
