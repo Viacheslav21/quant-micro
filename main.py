@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from engine.scanner import MicroScanner, is_risky_market, classify_theme
+from engine.scanner import MicroScanner, classify_theme
 from engine.ws_client import MicroWS
 from utils.db import Database
 from utils.telegram import TelegramBot
@@ -221,13 +221,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     market_id = candidate["market_id"]
     side = candidate.get("side", "YES")
 
-    # Double-check: reject risky markets even if scanner passed them
-    # Exception: ≥96¢ markets are safe even in risky themes — outcome is nearly certain
-    question = candidate.get("question", "")
     theme = candidate.get("theme", "other")
-    entry_price_check = candidate.get("best_ask") or candidate.get("price", 0)
-    if is_risky_market(question, theme) and entry_price_check < 0.96:
-        return False
 
     # Combined entry check: duplicate, theme block, SL blacklist, cooldown — 1 query instead of 4
     entry_check = await db.check_entry_allowed(market_id, side, theme)
@@ -501,22 +495,18 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         return
 
     # ── Hard max loss cap — ALWAYS enforced, even when SL is disabled ──
-    # Prevents one bad trade from wiping all profits (iran loss: -$9.28 erased 41 wins)
+    # No REST cooldown — this is an emergency stop, must fire immediately
     dollar_loss = pnl_pct * stake
     max_loss = CONFIG["MAX_LOSS_PER_POS"]
     if dollar_loss <= -max_loss:
-        # Verify via REST first
-        now_ts = time.time()
-        last_check = _sl_rest_cooldown.get(market_id, 0)
-        if now_ts - last_check < _SL_REST_COOLDOWN:
-            return
-        _sl_rest_cooldown[market_id] = now_ts
+        # Quick REST verify (no cooldown for max loss)
         rest_price = await _verify_price_rest(market_id, side)
         if rest_price is not None:
             rest_pnl = ((rest_price - entry_price) / entry_price) * stake
             if rest_pnl > -max_loss:
                 log.info(f"[MAX LOSS BLOCKED] {market_id[:8]} WS loss=${dollar_loss:.2f} but REST=${rest_pnl:.2f} — not real")
                 return
+            dollar_loss = rest_pnl  # use REST-confirmed loss
         pnl = dollar_loss
         closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "max_loss")
         if closed:

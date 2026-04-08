@@ -15,6 +15,10 @@ THEME_KEYWORDS = {
                    "ncaa","tournament","match","game ","score","winner","playoff",
                    "masters","pga","golf","tennis","boxing","formula 1","f1 ",
                    "real madrid","barcelona","lakers","celtics","brewers","red sox","yankees",
+                   "reds vs","marlins","cubs","dodgers","astros","braves","mets","padres",
+                   "phillies","tigers","twins","rays","orioles","guardians","royals",
+                   "diamondbacks","rockies","pirates","cardinals","nationals","giants","angels",
+                   "rangers","mariners","athletics","white sox","blue jays",
                    "nations league","fifa","uefa","concacaf","conmebol",
                    "clay court","linz","monza","open:","oxford united","fc win",
                    "o/u 2.5","o/u 3.5","o/u 1.5","games total",
@@ -90,41 +94,6 @@ THEME_KEYWORDS = {
     "mideast":    ["saudi","mbs","qatar","uae","emirates","bahrain","oman","iraq","baghdad"],
 }
 
-# Themes with ALWAYS-risky gap risk (sports scores, esports matches)
-RISKY_THEMES = {"sports", "esports", "israel", "war"}
-
-# Question patterns that indicate volatile/unpredictable outcomes
-# These are risky regardless of theme — price can gap from 95¢ to 0¢
-_RISKY_PATTERNS = [
-    # Price bets — any mention of $ amounts or price thresholds
-    re.compile(r"\$[\d,]+", re.I),                                          # any dollar amount ($78,000)
-    re.compile(r"(above|below|over|under|reach|hit|dip|touch)\s+\$?[\d,]+", re.I),  # price direction + number
-    re.compile(r"(up or down|higher or lower|green or red)", re.I),         # binary price direction
-    re.compile(r"(price|market cap|fdv|mcap)", re.I),                       # price-related nouns
-    # Sports/competition
-    re.compile(r"will .+ (beat|defeat|win against|lose to)", re.I),
-    re.compile(r"will .+ win\s+(on|in|at|against|the|their)\b", re.I),  # "will X win on [date]", "will X win the match"
-    re.compile(r" vs\.? ", re.I),
-    re.compile(r"(score|goals?|points?) (over|under)", re.I),
-    # Counting/threshold/range — "90 million or more", "80 ships", "be 7°C"
-    re.compile(r"(post|tweet|send|write|publish)\s+\d+[\s-]+\d+", re.I),
-    re.compile(r"\d+[\s-]+\d+\s+(tweets?|posts?|times?|mentions?)", re.I),
-    re.compile(r"\b\d+-\d+\b.*\b(tweets?|posts?|goals?|points?|runs?|yards?)\b", re.I),
-    re.compile(r"(exactly|between)\s+\d+", re.I),
-    re.compile(r"(more|fewer|less) than \d+", re.I),                        # "more than 5"
-    re.compile(r"\d+[\w\s]*(or more|or less|or fewer|\+)", re.I),           # "90 million or more", "80+"
-    re.compile(r"(get|have|receive|reach)\s+\d{2,}", re.I),                  # "get 90 million views" (2+ digit numbers)
-    re.compile(r"how many", re.I),
-    re.compile(r"(mention|say|use the word)", re.I),
-    # Weather / temperature / measurement bets — unpredictable
-    re.compile(r"(temperature|°[CF]|degrees|celsius|fahrenheit|weather|rainfall|wind speed)", re.I),
-    re.compile(r"(highest|lowest|average|max|min)\s+(temperature|temp|wind|rain)", re.I),
-    # Exact number bets — "be 7°C", "be exactly", "end at"
-    re.compile(r"\bbe\s+\d+", re.I),                                        # "be 7°C", "be 100"
-    # Ships/transit/counting physical events
-    re.compile(r"\d+\s+(ships?|vessels?|flights?|trains?|trucks?)\s+(transit|cross|pass)", re.I),
-]
-
 # --- Date parsing from question text ---
 _MONTH_MAP = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -191,25 +160,17 @@ def _parse_date_from_question(question: str):
     return None
 
 
+_VS_PATTERN = re.compile(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+vs\.?\s+[A-Z][a-z]+")
+
 def classify_theme(question: str) -> str:
     q = question.lower()
     for theme, keywords in THEME_KEYWORDS.items():
         if any(kw in q for kw in keywords):
             return theme
+    # "Team Name vs. Team Name" pattern → sports
+    if _VS_PATTERN.search(question):
+        return "sports"
     return "other"
-
-
-def is_risky_market(question: str, theme: str) -> bool:
-    """Markets where high price does NOT mean safe resolution.
-    Sports/esports: always risky (score-based, unpredictable).
-    Price bets, counting bets, mention bets: gap risk.
-    """
-    if theme in RISKY_THEMES:
-        return True
-    for pat in _RISKY_PATTERNS:
-        if pat.search(question):
-            return True
-    return False
 
 
 def quality_score(price: float, spread: float, days_left: float,
@@ -297,7 +258,6 @@ class MicroScanner:
         direct = []
         watchlist = []
         seen = set()
-        skipped_risky = 0
         skipped_no_date = 0
 
         try:
@@ -400,12 +360,6 @@ class MicroScanner:
 
                 theme = classify_theme(question)
 
-                # Skip risky markets — these have gap risk (except ≥96¢ which are near-certain)
-                best_price = max(yes_price, no_price)
-                if is_risky_market(question, theme) and best_price < 0.96:
-                    skipped_risky += 1
-                    continue
-
                 yes_token, no_token = _parse_token_ids(m)
                 market_id = str(m["id"])
 
@@ -487,7 +441,7 @@ class MicroScanner:
             log.info(
                 f"[Scanner] {len(direct)} direct (≥{entry_price:.0%}) + "
                 f"{len(watchlist)} watchlist ({wl_min:.0%}-{entry_price:.0%}), "
-                f"≤{max_days:.0f}d | skipped {skipped_risky} risky, {skipped_no_date} no-date"
+                f"≤{max_days:.0f}d | skipped {skipped_no_date} no-date"
             )
             return direct, watchlist
 
