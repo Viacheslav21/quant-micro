@@ -1,4 +1,3 @@
-import json
 import os
 import time
 import logging
@@ -332,10 +331,6 @@ class Database:
             await conn.execute("DELETE FROM micro_positions")
             await conn.execute("DELETE FROM micro_watchlist")
         log.info("[DB] Full reset: all positions/watchlist cleared")
-
-    async def log_event(self, event_type: str, market_id: str = None, details: dict = None):
-        """No-op — micro_log table removed."""
-        pass
 
     # ── Cleanup ──
 

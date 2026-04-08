@@ -320,12 +320,6 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         f"Q={quality:.0f} | {days}d left"
     )
 
-    await db.log_event("OPEN", market_id, {
-        "side": side, "entry_price": entry_price, "stake": stake,
-        "roi": round(roi, 4), "days_left": days, "quality": quality,
-        "spread": candidate.get("spread", 0), "source": source, "mode": mode,
-    })
-
     stats_now = await db.get_stats(CONFIG["BANKROLL"])
     open_count = len(await db.get_open_positions())
     await tg.send(
@@ -460,9 +454,6 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             _invalidate_pos_cache(ws_key)
             await db.recalibrate_theme(pos.get("theme", "other"))
             log.info(f"[RESOLVED] LOSS {side} '{pos['question'][:40]}' PnL: ${pnl:.2f}")
-            await db.log_event("CLOSE_RESOLVED", market_id, {
-                "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price, "result": "LOSS",
-            })
             await tg.send(
                 f"🔬 <b>MICRO</b> | 🏁 <b>RESOLVED LOSS</b>\n"
                 f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
@@ -480,10 +471,6 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             await db.recalibrate_theme(pos.get("theme", "other"))
             log.info(f"[RESOLVED] WIN {side} '{pos['question'][:40]}' PnL: +${pnl:.2f}")
             hold_hours = _days_to_expiry_from_pos(pos, "opened_at")
-            await db.log_event("CLOSE_RESOLVED", market_id, {
-                "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
-                "hold_hours": hold_hours, "theme": pos.get("theme"),
-            })
             stats_now = await db.get_stats(CONFIG["BANKROLL"])
             await tg.send(
                 f"🔬 <b>MICRO</b> | 🏁 <b>RESOLVED WIN</b> ✅\n\n"
@@ -514,10 +501,6 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             _invalidate_pos_cache(ws_key)
             await db.recalibrate_theme(pos.get("theme", "other"))
             log.info(f"[MAX LOSS] {side} '{pos['question'][:40]}' loss=${pnl:.2f} > cap ${max_loss}")
-            await db.log_event("CLOSE_MAX_LOSS", market_id, {
-                "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
-                "max_loss_cap": max_loss,
-            })
             await tg.send(
                 f"🔬 <b>MICRO</b> | 🚨 <b>MAX LOSS CAP</b>\n\n"
                 f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
@@ -565,10 +548,6 @@ async def check_position_price(ws_key: str, price: float, info: dict,
                 f"PnL: ${pnl:.2f} ({pnl_pct:+.1%})"
                 f"{f' (REST confirmed: {rest_price:.4f})' if rest_price else ' (REST unavailable)'}"
             )
-            await db.log_event("CLOSE_SL", market_id, {
-                "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
-                "days_to_expiry": days_to_expiry, "theme": pos.get("theme"),
-            })
             await tg.send(
                 f"🔬 <b>MICRO</b> | 🛑 <b>STOP LOSS</b>\n\n"
                 f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
@@ -602,9 +581,6 @@ async def check_position_price(ws_key: str, price: float, info: dict,
                 f"[RAPID DROP] LOSS {side} '{pos['question'][:40]}' @ {bid_price:.2f}¢ "
                 f"PnL: ${pnl:.2f} ({pnl_pct:+.1%})"
             )
-            await db.log_event("CLOSE_RAPID", market_id, {
-                "side": side, "pnl": round(pnl, 4), "entry": entry_price, "exit": bid_price,
-            })
             await tg.send(
                 f"🔬 <b>MICRO</b> | <b>RAPID DROP</b> {side}\n{pos['question'][:60]}\n"
                 f"Entry: {entry_price:.2f}¢ → {bid_price:.2f}¢\n"
@@ -620,8 +596,9 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
     open_pos = await db.get_open_positions()
     now = datetime.now(timezone.utc)
 
+    # Filter to expired positions only
+    expired = []
     for pos in open_pos:
-        # Only check positions past their end_date
         end_date_str = pos.get("end_date")
         if not end_date_str:
             continue
@@ -630,68 +607,70 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
         except Exception:
             continue
         if now < end:
-            continue  # not expired yet — skip
+            continue
+        pos["_hours_past"] = (now - end).total_seconds() / 3600
+        expired.append(pos)
 
+    if not expired:
+        return
+
+    # Parallel REST fetch for all expired positions
+    async def _fetch_market(mid):
+        try:
+            resp = await _http_client.get(f"https://gamma-api.polymarket.com/markets/{mid}", timeout=10)
+            return resp.json() if resp.status_code == 200 else None
+        except Exception:
+            return None
+
+    market_data = await asyncio.gather(*[_fetch_market(p["market_id"]) for p in expired])
+
+    for pos, mdata in zip(expired, market_data):
         market_id = pos["market_id"]
         side = pos["side"]
         entry_price = pos["entry_price"]
         stake = pos["stake_amt"]
         ws_key = f"{market_id}_{side}"
-        hours_past = (now - end).total_seconds() / 3600
+        hours_past = pos["_hours_past"]
 
-        # 1. Check resolution via REST API
-        try:
-            resp = await _http_client.get(
-                f"https://gamma-api.polymarket.com/markets/{market_id}", timeout=10)
-            if resp.status_code == 200:
-                mdata = resp.json()
-                if mdata.get("closed") or mdata.get("resolved"):
-                    # Determine winner from resolved prices (more reliable than outcome field)
-                    yes_p = float(mdata.get("outcomePrices", mdata.get("yes_price", 0)) or 0) if not isinstance(mdata.get("outcomePrices"), str) else 0
-                    no_p = 0
-                    try:
-                        # outcomePrices is typically a JSON string like "[1.0, 0.0]" or a list
-                        op = mdata.get("outcomePrices")
-                        if isinstance(op, str):
-                            import json as _json
-                            prices = _json.loads(op)
-                            yes_p = float(prices[0]) if prices else 0
-                            no_p = float(prices[1]) if len(prices) > 1 else 1 - yes_p
-                        elif isinstance(op, list):
-                            yes_p = float(op[0]) if op else 0
-                            no_p = float(op[1]) if len(op) > 1 else 1 - yes_p
-                        else:
-                            yes_p = float(mdata.get("yes_price", 0) or 0)
-                            no_p = float(mdata.get("no_price", 0) or 0)
-                    except Exception:
-                        yes_p = float(mdata.get("yes_price", 0) or 0)
-                        no_p = float(mdata.get("no_price", 0) or 0)
-                    won = (side == "YES" and yes_p > 0.9) or (side == "NO" and no_p > 0.9)
-                    pnl = ((1.0 - entry_price) / entry_price) * stake if won else -stake
-                    result = "WIN" if won else "LOSS"
-                    closed = await db.close_position(pos["id"], round(pnl, 4), result, "resolved")
-                    if closed:
-                        ws.unmark_position(ws_key)
-                        _invalidate_pos_cache(ws_key)
-                        await db.recalibrate_theme(pos.get("theme", "other"))
-                        log.info(f"[RESOLVED] {result} {side} '{pos['question'][:40]}' yes_p={yes_p:.2f} no_p={no_p:.2f} PnL: ${pnl:.2f}")
-                        await tg.send(
-                            f"🔬 <b>MICRO</b> | 🏁 <b>RESOLVED {result}</b> {'✅' if won else '❌'}\n"
-                            f"{pos['question'][:60]}\n"
-                            f"PnL: <b>${pnl:.2f}</b>"
-                        )
-                    continue
-        except Exception as e:
-            log.debug(f"[RESOLVE] REST check failed {market_id[:8]}: {e}")
+        # 1. Check resolution
+        if mdata and (mdata.get("closed") or mdata.get("resolved")):
+            yes_p, no_p = 0, 0
+            try:
+                op = mdata.get("outcomePrices")
+                if isinstance(op, str):
+                    prices = json.loads(op)
+                    yes_p = float(prices[0]) if prices else 0
+                    no_p = float(prices[1]) if len(prices) > 1 else 1 - yes_p
+                elif isinstance(op, list):
+                    yes_p = float(op[0]) if op else 0
+                    no_p = float(op[1]) if len(op) > 1 else 1 - yes_p
+                else:
+                    yes_p = float(mdata.get("yes_price", 0) or 0)
+                    no_p = float(mdata.get("no_price", 0) or 0)
+            except Exception:
+                yes_p = float(mdata.get("yes_price", 0) or 0)
+                no_p = float(mdata.get("no_price", 0) or 0)
+            won = (side == "YES" and yes_p > 0.9) or (side == "NO" and no_p > 0.9)
+            pnl = ((1.0 - entry_price) / entry_price) * stake if won else -stake
+            result = "WIN" if won else "LOSS"
+            closed = await db.close_position(pos["id"], round(pnl, 4), result, "resolved")
+            if closed:
+                ws.unmark_position(ws_key)
+                _invalidate_pos_cache(ws_key)
+                await db.recalibrate_theme(pos.get("theme", "other"))
+                log.info(f"[RESOLVED] {result} {side} '{pos['question'][:40]}' yes_p={yes_p:.2f} no_p={no_p:.2f} PnL: ${pnl:.2f}")
+                await tg.send(
+                    f"🔬 <b>MICRO</b> | 🏁 <b>RESOLVED {result}</b> {'✅' if won else '❌'}\n"
+                    f"{pos['question'][:60]}\n"
+                    f"PnL: <b>${pnl:.2f}</b>"
+                )
+            continue
 
         # 2. Force-close if 72h+ past expiry
         if hours_past < 72:
             continue
 
         current_price = pos.get("current_price", entry_price)
-        rest_price = await _verify_price_rest(market_id, side)
-        if rest_price is not None:
-            current_price = rest_price
         pnl = ((current_price - entry_price) / entry_price) * stake
         result = "WIN" if pnl >= 0 else "LOSS"
         closed = await db.close_position(pos["id"], round(pnl, 4), result, "expired")
@@ -811,38 +790,52 @@ async def main():
         on_position_price=on_position_price,
     )
 
-    # Restore open positions into WS
-    # Fetch fresh token IDs from Polymarket API for each open position
+    # Restore open positions into WS (parallel token fetch)
     open_pos = await db.get_open_positions()
     restored = 0
+
+    # Single DB query for all watchlist tokens
+    wl_all = await db.get_watchlist()
+    wl_tokens = {w["market_id"]: w.get("yes_token") for w in wl_all if w.get("yes_token")}
+
+    needs_fetch = []
+    pos_tokens = {}
+    for pos in open_pos:
+        token_id = wl_tokens.get(pos["market_id"])
+        if token_id:
+            pos_tokens[pos["market_id"]] = token_id
+        else:
+            needs_fetch.append(pos["market_id"])
+
+    # Parallel API fetch for missing tokens
+    if needs_fetch:
+        async def _fetch_token(mid):
+            try:
+                r = await scanner.client.get(f"https://gamma-api.polymarket.com/markets/{mid}")
+                if r.status_code == 200:
+                    tids = r.json().get("clobTokenIds") or []
+                    if isinstance(tids, str):
+                        tids = json.loads(tids)
+                    return mid, tids[0] if tids else None
+            except Exception:
+                pass
+            return mid, None
+
+        results = await asyncio.gather(*[_fetch_token(mid) for mid in needs_fetch])
+        for mid, token_id in results:
+            if token_id:
+                pos_tokens[mid] = token_id
+                log.info(f"[RESTORE] Fetched YES token for {mid[:8]} from API")
+
     for pos in open_pos:
         side = pos.get("side", "YES")
         ws_key = f"{pos['market_id']}_{side}"
-
-        # Try watchlist first (fast, local)
-        wl = await db.get_watchlist_market(pos["market_id"])
-        token_id = wl.get("yes_token") if wl else None
-
-        # If no token in watchlist, fetch from API
-        if not token_id:
-            try:
-                r = await scanner.client.get(f"https://gamma-api.polymarket.com/markets/{pos['market_id']}")
-                if r.status_code == 200:
-                    mdata = r.json()
-                    tids = mdata.get("clobTokenIds") or []
-                    if isinstance(tids, str):
-                        tids = json.loads(tids)
-                    token_id = tids[0] if tids else None  # YES token
-                    if token_id:
-                        log.info(f"[RESTORE] Fetched YES token for {pos['market_id'][:8]} from API")
-            except Exception as e:
-                log.warning(f"[RESTORE] Failed to fetch token for {pos['market_id'][:8]}: {e}")
-
+        token_id = pos_tokens.get(pos["market_id"])
         if token_id:
             ws.register_market(
                 ws_key,
                 token_id=token_id,
-                token_side=side.lower(),  # "no" → ws_client will invert
+                token_side=side.lower(),
                 price=pos.get("entry_price", 0.9),
                 question=pos.get("question", ""),
                 is_position=True,
@@ -857,11 +850,6 @@ async def main():
 
     # Load config overrides from DB at startup
     await _reload_config(db)
-
-    await db.log_event("STARTUP", details={
-        "config": {k: v for k, v in CONFIG.items() if k not in ("TELEGRAM_TOKEN",)},
-        "open_positions": len(open_pos),
-    })
 
     await tg.send(
         f"<b>quant-micro v3 started</b>\n"
@@ -944,7 +932,6 @@ async def main():
                 break
             if await try_enter(c, db, ws, tg, source="scan"):
                 entered += 1
-                await asyncio.sleep(0.5)
 
         # 3b. Event cascade: enter NO on siblings of resolved markets
         cascade_entered = await check_event_cascade(scanner, db, ws, tg)
@@ -1004,12 +991,6 @@ async def main():
             if to_remove:
                 log.info(f"[CLEANUP] Removed {len(to_remove)} stale WS entries")
 
-        await db.log_event("SCAN", details={
-            "scan": scan_count, "direct": len(direct), "entered": entered,
-            "watchlist": len(watchlist), "new_ws": new_ws,
-            "open": len(open_pos), "bankroll": round(bankroll, 2),
-        })
-
     scan_count = 0
 
     # LISTEN for config_reload NOTIFY — instant config updates from dashboard
@@ -1060,7 +1041,6 @@ async def main():
     # ── Shutdown ──
 
     log.info("[MAIN] Shutting down...")
-    await db.log_event("SHUTDOWN")
     await ws.stop()
     ws_task.cancel()
     _http_client = None
