@@ -216,6 +216,20 @@ def _parse_date_from_question(question: str):
 
 _VS_PATTERN = re.compile(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+vs\.?\s+[A-Z][a-z]+")
 
+
+def dynamic_entry_price(days_left: float, base_price: float, config: dict = None) -> float:
+    """Lower entry threshold for near-expiry markets.
+    Configurable via ENTRY_PRICE_1D, ENTRY_PRICE_2D, ENTRY_PRICE_3D."""
+    cfg = config or {}
+    if days_left <= 1:
+        return min(base_price, cfg.get("ENTRY_PRICE_1D", 0.90))
+    elif days_left <= 2:
+        return min(base_price, cfg.get("ENTRY_PRICE_2D", 0.92))
+    elif days_left <= 3:
+        return min(base_price, cfg.get("ENTRY_PRICE_3D", 0.93))
+    return base_price
+
+
 def classify_theme(question: str) -> str:
     q = question.lower()
     for theme, keywords in THEME_KEYWORDS.items():
@@ -382,7 +396,9 @@ class MicroScanner:
                 no_price = float(raw_prices[1]) if len(raw_prices) > 1 else round(1.0 - yes_price, 4)
 
                 # Neither side in our target zone — skip early
-                if yes_price < wl_min and no_price < wl_min:
+                # Use 0.86 floor (lowest possible: 90¢ entry - 4¢ watchlist buffer)
+                early_min = min(wl_min, 0.86)
+                if yes_price < early_min and no_price < early_min:
                     continue
 
                 # Get days_left: API endDate first, then parse from question
@@ -419,8 +435,10 @@ class MicroScanner:
                 neg_risk_id = m.get("negRiskMarketID") or None
 
                 candidates_for_market = []
+                # Dynamic watchlist min: lower for near-expiry markets
+                dyn_wl = dynamic_entry_price(days_left, wl_min, self.config) - 0.04  # 4¢ buffer below entry
 
-                if yes_price >= wl_min:
+                if yes_price >= dyn_wl:
                     roi = (1.0 - yes_price) / yes_price
                     if roi >= min_roi:
                         q = quality_score(yes_price, spread, days_left, vol, liq)
@@ -435,7 +453,7 @@ class MicroScanner:
                                 "ws_side": "yes",
                             })
 
-                if no_price >= wl_min:
+                if no_price >= dyn_wl:
                     roi = (1.0 - no_price) / no_price
                     if roi >= min_roi:
                         q = quality_score(no_price, spread, days_left, vol, liq)
@@ -485,7 +503,8 @@ class MicroScanner:
                         "ws_side":   info["ws_side"],
                     }
 
-                    if info["price"] >= entry_price:
+                    dyn_entry = dynamic_entry_price(days_left, entry_price, self.config)
+                    if info["price"] >= dyn_entry:
                         direct.append(c)
                     else:
                         watchlist.append(c)
