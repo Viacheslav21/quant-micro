@@ -90,7 +90,7 @@ _SAFE_CONFIG_KEYS = {
     "ENTRY_PRICE_1D", "ENTRY_PRICE_2D", "ENTRY_PRICE_3D",
     "SL_PCT", "RAPID_DROP_PCT", "MAX_LOSS_PER_POS",
     "MAX_STAKE", "MIN_STAKE", "MAX_OPEN", "MAX_PER_THEME",
-    "MAX_DAYS_LEFT", "MIN_VOLUME", "SCAN_INTERVAL", "CONFIG_TAG",
+    "MAX_DAYS_LEFT", "MIN_VOLUME", "SCAN_INTERVAL", "CONFIG_TAG", "MAX_PER_NEG_RISK",
     "BANKROLL",
 }
 
@@ -227,7 +227,8 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     neg_risk_id = candidate.get("neg_risk_id")
 
     # Combined entry check: duplicate, theme block, SL blacklist, cooldown, negRisk group
-    entry_check = await db.check_entry_allowed(market_id, side, theme, neg_risk_id=neg_risk_id)
+    entry_check = await db.check_entry_allowed(market_id, side, theme, neg_risk_id=neg_risk_id,
+                                                   max_per_neg_risk=int(CONFIG.get("MAX_PER_NEG_RISK", 3)))
     if not entry_check["allowed"]:
         return entry_check["reason"]  # "duplicate", "theme_blocked", "sl_blacklist", "recent_close", "neg_risk_group"
 
@@ -235,9 +236,11 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     if len(open_pos) >= CONFIG["MAX_OPEN"]:
         return "max_open"
 
-    theme_count = sum(1 for p in open_pos if p.get("theme") == theme)
-    if theme_count >= CONFIG["MAX_PER_THEME"]:
-        return "theme_limit"
+    # negRisk markets have their own limit (MAX_PER_NEG_RISK), skip theme limit for them
+    if not neg_risk_id:
+        theme_count = sum(1 for p in open_pos if p.get("theme") == theme)
+        if theme_count >= CONFIG["MAX_PER_THEME"]:
+            return "theme_limit"
 
     stats = await db.get_stats(CONFIG["BANKROLL"])
     bankroll = stats.get("bankroll", CONFIG["BANKROLL"])

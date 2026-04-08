@@ -350,7 +350,8 @@ class Database:
             log.debug(f"[DB] Watchlist cleanup: {deleted}")
 
     async def check_entry_allowed(self, market_id: str, side: str, theme: str,
-                                   neg_risk_id: str = None, cooldown_hours: float = 6) -> dict:
+                                   neg_risk_id: str = None, cooldown_hours: float = 6,
+                                   max_per_neg_risk: int = 3) -> dict:
         """Combined entry check — replaces 4 separate queries with 1.
         Returns {allowed: bool, reason: str|None}."""
         async with self.pool.acquire() as conn:
@@ -377,7 +378,7 @@ class Database:
                     SELECT COUNT(*) FROM micro_positions
                     WHERE neg_risk_id = $1 AND status = 'open'
                 """, neg_risk_id)
-                if has_group >= 1:
+                if has_group >= max_per_neg_risk:
                     return {"allowed": False, "reason": "neg_risk_group"}
             return {"allowed": True, "reason": None}
 
