@@ -328,7 +328,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         f"{'✅' if side=='YES' else '❌'} {side} <b>{question[:80]}</b>\n"
         f"📊 Вход: <b>{entry_price*100:.1f}¢</b> | Ставка: <b>${stake:.2f}</b>\n"
         f"💹 ROI: {roi:.1%} | Q={quality:.0f} | {days}d left\n"
-        f"📉 Spread: {candidate.get('spread', 0)*100:.1f}¢ | SL: {'OFF' if (isinstance(days, (int, float)) and days <= 3) else f'{sl_pct:.0%}'}\n"
+        f"📉 Spread: {candidate.get('spread', 0)*100:.1f}¢ | SL: {'OFF' if (isinstance(days, (int, float)) and days <= 1) else f'{sl_pct:.0%}'}\n"
         f"💼 Банк: ${stats_now.get('bankroll', 0):.0f} | Открыто: {open_count+1}\n"
         f"🔗 <a href='https://polymarket.com/event/{candidate.get('slug') or candidate.get('market_id', '')}'>Polymarket</a>"
     )
@@ -593,9 +593,10 @@ async def check_position_price(ws_key: str, price: float, info: dict,
                 f"PnL: ${pnl:.2f} ({pnl_pct:+.1%})"
             )
             await tg.send(
-                f"🔬 <b>MICRO</b> | <b>RAPID DROP</b> {side}\n{pos['question'][:60]}\n"
-                f"Entry: {entry_price:.2f}¢ → {bid_price:.2f}¢\n"
-                f"PnL: ${pnl:.2f} ({pnl_pct:+.1%})"
+                f"🔬 <b>MICRO</b> | ⚡ <b>RAPID DROP</b>\n\n"
+                f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
+                f"📊 Вход: {entry_price*100:.1f}¢ → <b>{bid_price*100:.1f}¢</b>\n"
+                f"💰 PnL: <b>${pnl:.2f}</b> ({pnl_pct:+.1%})"
             )
         return
 
@@ -671,9 +672,10 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
                 await db.recalibrate_theme(pos.get("theme", "other"))
                 log.info(f"[RESOLVED] {result} {side} '{pos['question'][:40]}' yes_p={yes_p:.2f} no_p={no_p:.2f} PnL: ${pnl:.2f}")
                 await tg.send(
-                    f"🔬 <b>MICRO</b> | 🏁 <b>RESOLVED {result}</b> {'✅' if won else '❌'}\n"
-                    f"{pos['question'][:60]}\n"
-                    f"PnL: <b>${pnl:.2f}</b>"
+                    f"🔬 <b>MICRO</b> | 🏁 <b>RESOLVED {result}</b> {'✅' if won else '❌'}\n\n"
+                    f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
+                    f"📊 Вход: {entry_price*100:.1f}¢\n"
+                    f"💰 PnL: <b>${pnl:.2f}</b>"
                 )
             continue
 
@@ -691,8 +693,10 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
             await db.recalibrate_theme(pos.get("theme", "other"))
             log.info(f"[EXPIRED] {result} {side} '{pos['question'][:40]}' PnL: ${pnl:.2f} | {hours_past:.0f}h past expiry")
             await tg.send(
-                f"🔬 <b>MICRO</b> | <b>EXPIRED {result}</b> {side}\n{pos['question'][:60]}\n"
-                f"PnL: ${pnl:.2f} | {hours_past:.0f}h past expiry"
+                f"🔬 <b>MICRO</b> | ⏰ <b>EXPIRED {result}</b>\n\n"
+                f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
+                f"📊 Вход: {entry_price*100:.1f}¢ → <b>{current_price*100:.1f}¢</b>\n"
+                f"💰 PnL: <b>${pnl:.2f}</b> | {hours_past:.0f}ч после expiry"
             )
 
 
@@ -866,8 +870,8 @@ async def main():
     await tg.send(
         f"<b>quant-micro v3 started</b>\n"
         f"Mode: {'SIM' if CONFIG['SIMULATION'] else 'REAL'}\n"
-        f"Entry: ≥{CONFIG['ENTRY_MIN_PRICE']:.0%} | WL: {CONFIG['WATCHLIST_MIN_PRICE']:.0%}+\n"
-        f"Quality≥{CONFIG['MIN_QUALITY_SCORE']} | Risky themes excluded\n"
+        f"Entry: ≥{CONFIG['ENTRY_MIN_PRICE']:.0%} (1d→{CONFIG.get('ENTRY_PRICE_1D', 0.90):.0%}, 2d→{CONFIG.get('ENTRY_PRICE_2D', 0.92):.0%})\n"
+        f"Bankroll: ${CONFIG['BANKROLL']:.0f} | Tag: {CONFIG['CONFIG_TAG']}\n"
         f"Open: {len(open_pos)} positions"
     )
 
