@@ -616,11 +616,45 @@ async def check_position_price(ws_key: str, price: float, info: dict,
 # ── Time-based Exit Check ──
 
 async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
-    """Force-close positions whose end_date has passed (stuck/unresolved)."""
+    """Check all open positions via REST: resolved → proper payout, 72h past expiry → force close."""
     open_pos = await db.get_open_positions()
     now = datetime.now(timezone.utc)
 
     for pos in open_pos:
+        market_id = pos["market_id"]
+        side = pos["side"]
+        entry_price = pos["entry_price"]
+        stake = pos["stake_amt"]
+        ws_key = f"{market_id}_{side}"
+
+        # 1. Check resolution via REST API
+        try:
+            resp = await _http_client.get(
+                f"https://gamma-api.polymarket.com/markets/{market_id}", timeout=10)
+            if resp.status_code == 200:
+                mdata = resp.json()
+                if mdata.get("closed") or mdata.get("resolved"):
+                    outcome = (mdata.get("outcome") or "").lower()
+                    won = (side == "YES" and outcome in ("yes", "y", "1", "true")) or \
+                          (side == "NO" and outcome in ("no", "n", "0", "false"))
+                    pnl = ((1.0 - entry_price) / entry_price) * stake if won else -stake
+                    result = "WIN" if won else "LOSS"
+                    closed = await db.close_position(pos["id"], round(pnl, 4), result, "resolved")
+                    if closed:
+                        ws.unmark_position(ws_key)
+                        _invalidate_pos_cache(ws_key)
+                        await db.recalibrate_theme(pos.get("theme", "other"))
+                        log.info(f"[RESOLVED] {result} {side} '{pos['question'][:40]}' outcome={outcome} PnL: ${pnl:.2f}")
+                        await tg.send(
+                            f"🔬 <b>MICRO</b> | 🏁 <b>RESOLVED {result}</b> {'✅' if won else '❌'}\n"
+                            f"{pos['question'][:60]}\n"
+                            f"PnL: <b>${pnl:.2f}</b>"
+                        )
+                    continue
+        except Exception as e:
+            log.debug(f"[RESOLVE] REST check failed {market_id[:8]}: {e}")
+
+        # 2. Force-close if 72h+ past expiry
         end_date_str = pos.get("end_date")
         if not end_date_str:
             continue
@@ -628,38 +662,22 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
             end = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
         except Exception:
             continue
-
         hours_past = (now - end).total_seconds() / 3600
         if hours_past < 72:
-            continue  # give 72h grace period for delayed resolution
+            continue
 
-        # Position is 24h+ past expiry — force close
-        entry_price = pos["entry_price"]
         current_price = pos.get("current_price", entry_price)
-
-        rest_price = await _verify_price_rest(pos["market_id"], pos["side"])
+        rest_price = await _verify_price_rest(market_id, side)
         if rest_price is not None:
             current_price = rest_price
-
-        pnl_pct = (current_price - entry_price) / entry_price
-        pnl = pnl_pct * pos["stake_amt"]
+        pnl = ((current_price - entry_price) / entry_price) * stake
         result = "WIN" if pnl >= 0 else "LOSS"
-
         closed = await db.close_position(pos["id"], round(pnl, 4), result, "expired")
         if closed:
-            side = pos["side"]
-            ws_key = f"{pos['market_id']}_{side}"
             ws.unmark_position(ws_key)
             _invalidate_pos_cache(ws_key)
             await db.recalibrate_theme(pos.get("theme", "other"))
-            log.info(
-                f"[EXPIRED] {result} {side} '{pos['question'][:40]}' "
-                f"PnL: ${pnl:.2f} | {hours_past:.0f}h past expiry"
-            )
-            await db.log_event("CLOSE_EXPIRED", pos["market_id"], {
-                "side": side, "pnl": round(pnl, 4), "entry": entry_price,
-                "exit": current_price, "hours_past_expiry": round(hours_past, 1),
-            })
+            log.info(f"[EXPIRED] {result} {side} '{pos['question'][:40]}' PnL: ${pnl:.2f} | {hours_past:.0f}h past expiry")
             await tg.send(
                 f"🔬 <b>MICRO</b> | <b>EXPIRED {result}</b> {side}\n{pos['question'][:60]}\n"
                 f"PnL: ${pnl:.2f} | {hours_past:.0f}h past expiry"
