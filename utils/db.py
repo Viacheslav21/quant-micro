@@ -236,31 +236,19 @@ class Database:
                 "DELETE FROM micro_watchlist WHERE market_id = $1", market_id
             )
 
-    async def get_watchlist_market(self, market_id: str) -> Optional[dict]:
+    async def get_watchlist_market(self, market_id: str, side: str = None) -> Optional[dict]:
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM micro_watchlist WHERE market_id = $1", market_id
-            )
+            if side:
+                row = await conn.fetchrow(
+                    "SELECT * FROM micro_watchlist WHERE market_id = $1 AND side = $2", market_id, side
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT * FROM micro_watchlist WHERE market_id = $1", market_id
+                )
             return dict(row) if row else None
 
     # ── Positions ──
-
-    async def save_position(self, pos: dict):
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO micro_positions
-                    (id, market_id, question, theme, side, entry_price,
-                     current_price, stake_amt, tp_pct, sl_pct, config_tag, end_date, neg_risk_id)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-            """,
-                pos["id"], pos["market_id"], pos["question"],
-                pos.get("theme", "other"), pos["side"], pos["entry_price"],
-                pos["entry_price"], pos["stake_amt"],
-                pos.get("tp_pct", 0.05), pos.get("sl_pct", 0.05),
-                pos.get("config_tag", "micro-v3"),
-                pos.get("end_date"),
-                pos.get("neg_risk_id"),
-            )
 
     async def save_position_and_deduct(self, pos: dict, stake: float):
         """Save position. Bankroll computed from positions, no separate stats update needed."""
@@ -326,8 +314,7 @@ class Database:
                     COALESCE(SUM(pnl), 0) as total_pnl,
                     SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) as wins,
                     SUM(CASE WHEN result='LOSS' THEN 1 ELSE 0 END) as losses,
-                    COUNT(*) as total_trades,
-                    COALESCE(SUM(stake_amt), 0) as open_staked
+                    COUNT(*) as total_trades
                 FROM micro_positions WHERE status='closed'
             """)
             open_staked = await conn.fetchval(
@@ -394,20 +381,6 @@ class Database:
                     return {"allowed": False, "reason": "neg_risk_group"}
             return {"allowed": True, "reason": None}
 
-    async def has_position_on_market(self, market_id: str, side: str = None) -> bool:
-        async with self.pool.acquire() as conn:
-            if side:
-                row = await conn.fetchrow(
-                    "SELECT 1 FROM micro_positions WHERE market_id = $1 AND side = $2 AND status = 'open'",
-                    market_id, side,
-                )
-            else:
-                row = await conn.fetchrow(
-                    "SELECT 1 FROM micro_positions WHERE market_id = $1 AND status = 'open'",
-                    market_id,
-                )
-            return row is not None
-
     # ── Theme Calibration ──
 
     SHRINKAGE_K = 20  # Bayesian shrinkage strength toward global mean
@@ -446,13 +419,6 @@ class Database:
                 log.info(f"[THEME] BLOCKED '{theme}': {wins}/{n} WR={adj_wr:.1%} (raw={raw_wr:.1%})")
             return blocked
 
-    async def is_theme_blocked(self, theme: str) -> bool:
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT blocked FROM micro_theme_stats WHERE theme = $1", theme
-            )
-            return row["blocked"] if row else False
-
     async def get_theme_stats(self) -> list:
         """Theme stats computed from positions + blocked flag from micro_theme_stats."""
         async with self.pool.acquire() as conn:
@@ -470,40 +436,6 @@ class Database:
                 ORDER BY COUNT(*) DESC
             """)
             return [dict(r) for r in rows]
-
-    async def has_sl_loss(self, market_id: str, side: str = None) -> bool:
-        """Check if this market ever had a SL/rapid_drop loss — blacklist from re-entry."""
-        async with self.pool.acquire() as conn:
-            if side:
-                row = await conn.fetchrow(
-                    "SELECT 1 FROM micro_positions WHERE market_id = $1 AND side = $2 "
-                    "AND status = 'closed' AND close_reason IN ('stop_loss', 'rapid_drop')",
-                    market_id, side,
-                )
-            else:
-                row = await conn.fetchrow(
-                    "SELECT 1 FROM micro_positions WHERE market_id = $1 "
-                    "AND status = 'closed' AND close_reason IN ('stop_loss', 'rapid_drop')",
-                    market_id,
-                )
-            return row is not None
-
-    async def has_recent_close(self, market_id: str, side: str = None, hours: float = 6) -> bool:
-        """Check if a position on this market was closed recently (prevents re-entry loops)."""
-        async with self.pool.acquire() as conn:
-            if side:
-                row = await conn.fetchrow(
-                    "SELECT 1 FROM micro_positions WHERE market_id = $1 AND side = $2 "
-                    "AND status = 'closed' AND closed_at > NOW() - INTERVAL '1 hour' * $3",
-                    market_id, side, hours,
-                )
-            else:
-                row = await conn.fetchrow(
-                    "SELECT 1 FROM micro_positions WHERE market_id = $1 "
-                    "AND status = 'closed' AND closed_at > NOW() - INTERVAL '1 hour' * $3",
-                    market_id, hours,
-                )
-            return row is not None
 
     async def close(self):
         if self.pool:

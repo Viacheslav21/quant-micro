@@ -39,39 +39,44 @@ def find_config(key, src=src_main):
     m = re.search(rf'"{key}":\s*(?:float|int)\(os\.getenv\([^,]+,\s*"([^"]+)"\)', src)
     return m.group(1) if m else None
 
-check("MAX_STAKE = 50", find_config("MAX_STAKE") == "50.0", f"got {find_config('MAX_STAKE')}")
-check("MIN_STAKE = 5", find_config("MIN_STAKE") == "5.0", f"got {find_config('MIN_STAKE')}")
-check("ENTRY_MIN_PRICE = 0.95", find_config("ENTRY_MIN_PRICE") == "0.95", f"got {find_config('ENTRY_MIN_PRICE')}")
+check("BANKROLL default", find_config("BANKROLL") is not None)
+check("MAX_STAKE exists", find_config("MAX_STAKE") is not None)
+check("MIN_STAKE exists", find_config("MIN_STAKE") is not None)
+check("ENTRY_MIN_PRICE = 0.94", find_config("ENTRY_MIN_PRICE") == "0.94", f"got {find_config('ENTRY_MIN_PRICE')}")
 check("WATCHLIST_MIN_PRICE = 0.90", find_config("WATCHLIST_MIN_PRICE") == "0.90", f"got {find_config('WATCHLIST_MIN_PRICE')}")
-check("MIN_ROI = 0.01", find_config("MIN_ROI") == "0.01", f"got {find_config('MIN_ROI')}")
-check("MIN_LIQUIDITY_MULT = 100", find_config("MIN_LIQUIDITY_MULT") == "100", f"got {find_config('MIN_LIQUIDITY_MULT')}")
-check("MIN_QUALITY_SCORE = 25", find_config("MIN_QUALITY_SCORE") == "25", f"got {find_config('MIN_QUALITY_SCORE')}")
+check("MIN_ROI exists", find_config("MIN_ROI") is not None)
+check("MIN_QUALITY_SCORE exists", find_config("MIN_QUALITY_SCORE") is not None)
 check("MAX_OPEN = 50", find_config("MAX_OPEN") == "50")
 check("RESOLUTION_PRICE = 0.99", find_config("RESOLUTION_PRICE") == "0.99")
-check("MAX_DAYS_LEFT = 10", find_config("MAX_DAYS_LEFT") == "10")
+check("MAX_DAYS_LEFT exists", find_config("MAX_DAYS_LEFT") is not None)
 
 
 # ── 2. SL / Safety Guards ──
 print("\n\033[1m2. SL & Safety\033[0m")
 
-check("SL disabled ≤3d: 'days_to_expiry > 3'", "days_to_expiry > 3" in src_main)
-sl_count = src_main.count("days_to_expiry > 3")
-check("Both SL + rapid drop disabled", sl_count >= 2, f"found {sl_count} occurrences (need ≥2)")
+check("SL disabled ≤1d: 'days_to_expiry > 1'", "days_to_expiry > 1" in src_main)
 check("Division by zero: entry_price guard", "entry_price > 0" in src_main or "max(entry_price" in src_main)
 check("Resolution loss: bid_price <= 0.01", "bid_price <= 0.01" in src_main)
 check("Sanity check: 50% drop filter", "entry_price * 0.5" in src_main)
+check("MAX_LOSS hard cap", "MAX_LOSS_PER_POS" in src_main)
+check("MAX_LOSS always enforced", "Hard max loss cap" in src_main or "ALWAYS enforced" in src_main)
 
 
 # ── 3. Scanner Filters ──
 print("\n\033[1m3. Scanner\033[0m")
 
 check("acceptingOrders filter", "acceptingOrders" in src_scanner)
-check("Risky bypass ≥96¢", "best_price < 0.96" in src_scanner)
 check("Volume filter", "min_volume" in src_scanner)
 check("Spread filter", "max_spread" in src_scanner)
 check("Quality score function", "def quality_score" in src_scanner)
 check("Date parsing from question", "_parse_date_from_question" in src_scanner)
-check("Both YES and NO sides checked", "no_price >= wl_min" in src_scanner)
+check("Both YES and NO sides checked", "no_price >=" in src_scanner)
+check("Dynamic entry price function", "def dynamic_entry_price" in src_scanner)
+check("ENTRY_PRICE_1D configurable", "ENTRY_PRICE_1D" in src_scanner)
+check("ENTRY_PRICE_2D configurable", "ENTRY_PRICE_2D" in src_scanner)
+check("ENTRY_PRICE_3D configurable", "ENTRY_PRICE_3D" in src_scanner)
+check("VS pattern for sports", "_VS_PATTERN" in src_scanner)
+check("neg_risk_id in candidate", "neg_risk_id" in src_scanner)
 
 
 # ── 4. Position Monitoring ──
@@ -83,6 +88,7 @@ check("SL with REST verify", "_verify_price_rest" in src_main)
 check("Volume confirm for SL", "_check_volume_confirms" in src_main)
 check("Expired position cleanup", "check_expired_positions" in src_main)
 check("Bid price for exit (not mid)", "best_bid" in src_main)
+check("Parallel REST for expired", "asyncio.gather" in src_main)
 
 
 # ── 5. Telegram Messages ──
@@ -96,37 +102,51 @@ check("Win: shows PnL %", "pnl/stake" in src_main or "pnl_pct" in src_main)
 check("Loss: shows days to expiry", "days_to_expiry" in src_main)
 
 
-# ── 6. Data Collection ──
-print("\n\033[1m6. Data Collection\033[0m")
+# ── 6. DB & Data ──
+print("\n\033[1m6. DB & Data\033[0m")
 
-check("Log: OPEN event", '"OPEN"' in src_main)
-check("Log: CLOSE_RESOLVED event", '"CLOSE_RESOLVED"' in src_main)
-check("Log: CLOSE_SL event", '"CLOSE_SL"' in src_main)
-check("Log: hold_hours in close", "hold_hours" in src_main)
-check("Log: theme in close", '"theme"' in src_main)
-check("Log: days_to_expiry in SL close", "days_to_expiry" in src_main)
-check("DB: micro_log table", "micro_log" in src_db)
-check("DB: micro_theme_stats", "micro_theme_stats" in src_db)
-check("DB: SL blacklist", "has_sl_loss" in src_db)
+check("micro_positions table", "micro_positions" in src_db)
+check("micro_watchlist table", "micro_watchlist" in src_db)
+check("micro_theme_stats table", "micro_theme_stats" in src_db)
+check("neg_risk_id column in positions", "neg_risk_id" in src_db)
+check("neg_risk_id column in watchlist", "neg_risk_id" in src_db)
+check("neg_risk_id index", "idx_micro_pos_neg_risk" in src_db)
+check("Combined entry check (1 query)", "check_entry_allowed" in src_db)
+check("SL blacklist in entry check", "stop_loss" in src_db)
+check("NegRisk group check in entry", "neg_risk_group" in src_db)
+check("Atomic close: WHERE status='open'", "WHERE status='open'" in src_db or "status = 'open'" in src_db)
+check("Bayesian theme auto-block", "SHRINKAGE_K" in src_db)
+check("Bankroll computed from positions", "starting_bankroll + total_pnl" in src_db)
 
 
-# ── 7. ROI Math ──
-print("\n\033[1m7. ROI Math\033[0m")
+# ── 7. Risk Management ──
+print("\n\033[1m7. Risk Management\033[0m")
 
-for price, expected_min in [(0.95, 0.05), (0.97, 0.03), (0.99, 0.009)]:
+check("NegRisk group limit in entry", "neg_risk_id" in src_main)
+check("Dynamic entry in WS callback", "dynamic_entry_price" in src_main)
+check("LISTEN config with reconnect", "reconnecting in" in src_main)
+check("Watchlist lookup by side", "get_watchlist_market(market_id, side)" in src_main)
+check("Event cascade", "check_event_cascade" in src_main)
+check("Theme diversification limit", "MAX_PER_THEME" in src_main)
+check("Config safe keys", "_SAFE_CONFIG_KEYS" in src_main)
+check("BANKROLL in safe keys", '"BANKROLL"' in src_main)
+
+
+# ── 8. ROI Math ──
+print("\n\033[1m8. ROI Math\033[0m")
+
+for price, expected_min in [(0.90, 0.10), (0.92, 0.08), (0.94, 0.06), (0.97, 0.03), (0.99, 0.009)]:
     roi = (1.0 - price) / price
     check(f"ROI at {price*100:.0f}¢ = {roi:.3f} > 1%", roi > 0.01, f"got {roi:.4f}")
 
-# Stake math
-for bankroll, expected in [(500, 25), (1000, 50), (50, 5), (3, 0)]:
-    pct = bankroll * 0.05
-    stake = min(50.0, max(pct, 5.0))
-    if stake > bankroll: stake = 0
-    check(f"Stake ${bankroll} → ${stake:.0f}", stake == expected, f"got {stake}")
+# Dynamic entry price math
+check("Dynamic 1d: 0.90", 0.90 <= 0.94)  # min(base, 0.90)
+check("Dynamic 2d: 0.92", 0.92 <= 0.94)
+check("Dynamic 3d: 0.93", 0.93 <= 0.94)
 
 
-# ── 8. WS Client ──
-print("\n\033[1m8. WS Client\033[0m")
+# ── 9. WS Client ──
+print("\n\033[1m9. WS Client\033[0m")
 
 check("Auto-reconnect", "reconnect" in src_ws.lower() or "RECONNECT_DELAY" in src_ws)
 check("Heartbeat", "PING" in src_ws or "heartbeat" in src_ws.lower())

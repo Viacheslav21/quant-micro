@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from engine.scanner import MicroScanner, classify_theme
+from engine.scanner import MicroScanner, classify_theme, dynamic_entry_price
 from engine.ws_client import MicroWS
 from utils.db import Database
 from utils.telegram import TelegramBot
@@ -343,7 +343,11 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
 async def check_watchlist_price(ws_key: str, price: float, info: dict,
                                  db: Database, ws: MicroWS, tg: TelegramBot):
     """WS callback: watchlist price updated. Enter if it hit entry zone."""
-    if _shutdown or price < CONFIG["ENTRY_MIN_PRICE"]:
+    if _shutdown:
+        return
+
+    # Quick pre-filter: below lowest possible entry (90¢)
+    if price < 0.86:
         return
 
     parts = ws_key.rsplit("_", 1)
@@ -355,7 +359,7 @@ async def check_watchlist_price(ws_key: str, price: float, info: dict,
     if spread > CONFIG["MAX_SPREAD"]:
         return
 
-    wl = await db.get_watchlist_market(market_id)
+    wl = await db.get_watchlist_market(market_id, side)
     if not wl:
         return
 
@@ -369,6 +373,11 @@ async def check_watchlist_price(ws_key: str, price: float, info: dict,
             days_left = wl.get("days_left", 0)
     else:
         days_left = wl.get("days_left", 0)
+
+    # Dynamic entry price based on days left
+    dyn_entry = dynamic_entry_price(days_left, CONFIG["ENTRY_MIN_PRICE"], CONFIG)
+    if price < dyn_entry:
+        return
 
     candidate = {
         "market_id": market_id,
@@ -1001,19 +1010,21 @@ async def main():
 
     # LISTEN for config_reload NOTIFY — instant config updates from dashboard
     async def _listen_config():
-        try:
-            import asyncpg as _apg
-            _listen_conn = await _apg.connect(db.url)
-            await _listen_conn.add_listener("config_reload",
-                lambda conn, pid, channel, payload:
-                    asyncio.create_task(_reload_config(db)))
-            await _listen_conn.execute("LISTEN config_reload")
-            log.info("[CONFIG] LISTEN config_reload active")
-            while not _shutdown:
-                await asyncio.sleep(60)
-            await _listen_conn.close()
-        except Exception as e:
-            log.warning(f"[CONFIG] LISTEN setup failed: {e}")
+        import asyncpg as _apg
+        while not _shutdown:
+            try:
+                _listen_conn = await _apg.connect(db.url)
+                await _listen_conn.add_listener("config_reload",
+                    lambda conn, pid, channel, payload:
+                        asyncio.create_task(_reload_config(db)))
+                await _listen_conn.execute("LISTEN config_reload")
+                log.info("[CONFIG] LISTEN config_reload active")
+                while not _shutdown:
+                    await asyncio.sleep(60)
+                await _listen_conn.close()
+            except Exception as e:
+                log.warning(f"[CONFIG] LISTEN failed: {e}, reconnecting in 10s")
+                await asyncio.sleep(10)
     asyncio.create_task(_listen_config())
 
     while not _shutdown:
