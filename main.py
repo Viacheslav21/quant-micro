@@ -222,9 +222,10 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     side = candidate.get("side", "YES")
     question = candidate.get("question", "")
     theme = candidate.get("theme", "other")
+    neg_risk_id = candidate.get("neg_risk_id")
 
-    # Combined entry check: duplicate, theme block, SL blacklist, cooldown — 1 query instead of 4
-    entry_check = await db.check_entry_allowed(market_id, side, theme)
+    # Combined entry check: duplicate, theme block, SL blacklist, cooldown, negRisk group
+    entry_check = await db.check_entry_allowed(market_id, side, theme, neg_risk_id=neg_risk_id)
     if not entry_check["allowed"]:
         return False
 
@@ -288,6 +289,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         "sl_pct": sl_pct,
         "config_tag": CONFIG["CONFIG_TAG"],
         "end_date": candidate.get("end_date"),
+        "neg_risk_id": neg_risk_id,
     }
 
     await db.save_position_and_deduct(pos, stake)
@@ -382,6 +384,7 @@ async def check_watchlist_price(ws_key: str, price: float, info: dict,
         "ws_token": wl.get("yes_token"),
         "ws_side": "no" if side == "NO" else "yes",
         "end_date": wl.get("end_date"),
+        "neg_risk_id": wl.get("neg_risk_id"),
     }
 
     entered = await try_enter(candidate, db, ws, tg, source="ws")
@@ -735,6 +738,7 @@ async def check_event_cascade(scanner, db: Database, ws, tg, source="cascade"):
                 "no_token": s["no_token"],
                 "ws_token": s["yes_token"],  # always subscribe to YES token
                 "ws_side": "no",
+                "neg_risk_id": neg_risk_id,
             }
 
             if await try_enter(candidate, db, ws, tg, source=source):

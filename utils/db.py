@@ -106,6 +106,18 @@ class Database:
             await conn.execute("""
                 ALTER TABLE micro_positions ADD COLUMN IF NOT EXISTS end_date TEXT DEFAULT NULL;
             """)
+            # Add neg_risk_id for correlated position grouping
+            await conn.execute("""
+                ALTER TABLE micro_positions ADD COLUMN IF NOT EXISTS neg_risk_id TEXT DEFAULT NULL;
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_micro_pos_neg_risk
+                    ON micro_positions(neg_risk_id) WHERE neg_risk_id IS NOT NULL;
+            """)
+            # Add neg_risk_id to watchlist for correlated position grouping
+            await conn.execute("""
+                ALTER TABLE micro_watchlist ADD COLUMN IF NOT EXISTS neg_risk_id TEXT DEFAULT NULL;
+            """)
             # Cleanup old unused columns
             for col in ["no_price", "peak_price", "neg_risk"]:
                 await conn.execute(f"""
@@ -154,8 +166,8 @@ class Database:
                 INSERT INTO micro_watchlist
                     (market_id, side, question, theme, yes_price,
                      volume, liquidity, spread, best_ask,
-                     days_left, end_date, roi, quality, yes_token, no_token)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                     days_left, end_date, roi, quality, yes_token, no_token, neg_risk_id)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
                 ON CONFLICT (market_id, side) DO UPDATE SET
                     yes_price  = EXCLUDED.yes_price,
                     volume     = EXCLUDED.volume,
@@ -165,6 +177,7 @@ class Database:
                     days_left  = EXCLUDED.days_left,
                     roi        = EXCLUDED.roi,
                     quality    = EXCLUDED.quality,
+                    neg_risk_id = EXCLUDED.neg_risk_id,
                     updated_at = NOW()
             """,
                 market["market_id"], market.get("side", "YES"),
@@ -175,6 +188,7 @@ class Database:
                 market.get("days_left", 0), market.get("end_date"),
                 market.get("roi", 0), market.get("quality", 0),
                 market.get("yes_token"), market.get("no_token"),
+                market.get("neg_risk_id"),
             )
 
     async def upsert_watchlist_batch(self, markets: list):
@@ -186,8 +200,8 @@ class Database:
                 INSERT INTO micro_watchlist
                     (market_id, side, question, theme, yes_price,
                      volume, liquidity, spread, best_ask,
-                     days_left, end_date, roi, quality, yes_token, no_token)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                     days_left, end_date, roi, quality, yes_token, no_token, neg_risk_id)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
                 ON CONFLICT (market_id, side) DO UPDATE SET
                     yes_price  = EXCLUDED.yes_price,
                     volume     = EXCLUDED.volume,
@@ -197,6 +211,7 @@ class Database:
                     days_left  = EXCLUDED.days_left,
                     roi        = EXCLUDED.roi,
                     quality    = EXCLUDED.quality,
+                    neg_risk_id = EXCLUDED.neg_risk_id,
                     updated_at = NOW()
             """, [(m["market_id"], m.get("side", "YES"),
                    m["question"], m.get("theme", "other"),
@@ -205,7 +220,8 @@ class Database:
                    m.get("spread", 0), m.get("best_ask", 0),
                    m.get("days_left", 0), m.get("end_date"),
                    m.get("roi", 0), m.get("quality", 0),
-                   m.get("yes_token"), m.get("no_token")) for m in markets])
+                   m.get("yes_token"), m.get("no_token"),
+                   m.get("neg_risk_id")) for m in markets])
 
     async def get_watchlist(self) -> list:
         async with self.pool.acquire() as conn:
@@ -234,8 +250,8 @@ class Database:
             await conn.execute("""
                 INSERT INTO micro_positions
                     (id, market_id, question, theme, side, entry_price,
-                     current_price, stake_amt, tp_pct, sl_pct, config_tag, end_date)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                     current_price, stake_amt, tp_pct, sl_pct, config_tag, end_date, neg_risk_id)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
             """,
                 pos["id"], pos["market_id"], pos["question"],
                 pos.get("theme", "other"), pos["side"], pos["entry_price"],
@@ -243,6 +259,7 @@ class Database:
                 pos.get("tp_pct", 0.05), pos.get("sl_pct", 0.05),
                 pos.get("config_tag", "micro-v3"),
                 pos.get("end_date"),
+                pos.get("neg_risk_id"),
             )
 
     async def save_position_and_deduct(self, pos: dict, stake: float):
@@ -251,8 +268,8 @@ class Database:
             await conn.execute("""
                 INSERT INTO micro_positions
                     (id, market_id, question, theme, side, entry_price,
-                     current_price, stake_amt, tp_pct, sl_pct, config_tag, end_date)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                     current_price, stake_amt, tp_pct, sl_pct, config_tag, end_date, neg_risk_id)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
             """,
                 pos["id"], pos["market_id"], pos["question"],
                 pos.get("theme", "other"), pos["side"], pos["entry_price"],
@@ -260,6 +277,7 @@ class Database:
                 pos.get("tp_pct", 0.05), pos.get("sl_pct", 0.05),
                 pos.get("config_tag", "micro-v3"),
                 pos.get("end_date"),
+                pos.get("neg_risk_id"),
             )
 
     async def get_open_position_by_market(self, market_id: str, side: str) -> Optional[dict]:
@@ -344,7 +362,8 @@ class Database:
             """)
             log.debug(f"[DB] Watchlist cleanup: {deleted}")
 
-    async def check_entry_allowed(self, market_id: str, side: str, theme: str, cooldown_hours: float = 6) -> dict:
+    async def check_entry_allowed(self, market_id: str, side: str, theme: str,
+                                   neg_risk_id: str = None, cooldown_hours: float = 6) -> dict:
         """Combined entry check — replaces 4 separate queries with 1.
         Returns {allowed: bool, reason: str|None}."""
         async with self.pool.acquire() as conn:
@@ -365,6 +384,14 @@ class Database:
                 return {"allowed": False, "reason": "sl_blacklist"}
             if row["has_recent"]:
                 return {"allowed": False, "reason": "recent_close"}
+            # negRisk group limit: max 1 open position per negRisk event
+            if neg_risk_id:
+                has_group = await conn.fetchval("""
+                    SELECT COUNT(*) FROM micro_positions
+                    WHERE neg_risk_id = $1 AND status = 'open'
+                """, neg_risk_id)
+                if has_group >= 1:
+                    return {"allowed": False, "reason": "neg_risk_group"}
             return {"allowed": True, "reason": None}
 
     async def has_position_on_market(self, market_id: str, side: str = None) -> bool:

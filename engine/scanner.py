@@ -416,6 +416,7 @@ class MicroScanner:
 
                 yes_token, no_token = _parse_token_ids(m)
                 market_id = str(m["id"])
+                neg_risk_id = m.get("negRiskMarketID") or None
 
                 candidates_for_market = []
 
@@ -473,6 +474,7 @@ class MicroScanner:
                         "volume":    vol,
                         "liquidity": liq,
                         "spread":    spread,
+                        "neg_risk_id": neg_risk_id,
                         "days_left": round(days_left, 2),
                         "end_date":  end_str,
                         "roi":       round(info["roi"], 4),
