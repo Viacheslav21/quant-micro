@@ -220,7 +220,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
 
     market_id = candidate["market_id"]
     side = candidate.get("side", "YES")
-
+    question = candidate.get("question", "")
     theme = candidate.get("theme", "other")
 
     # Combined entry check: duplicate, theme block, SL blacklist, cooldown — 1 query instead of 4
