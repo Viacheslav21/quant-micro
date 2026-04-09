@@ -13,7 +13,7 @@ THEME_KEYWORDS = {
     # Sports & esports FIRST — must match before "war" catches "strike" or generic " vs "
     "sports":     [
                    # Leagues
-                   "nba","nfl","mlb","nhl","mls","ufc","mma","wwe","pga","lpga",
+                   "nba","nfl ","mlb","nhl","mls","ufc","mma","wwe","pga","lpga",
                    "atp","wta","ncaa","premier league","la liga","serie a",
                    "bundesliga","ligue 1","eredivisie","champions league",
                    "europa league","conference league","nations league",
