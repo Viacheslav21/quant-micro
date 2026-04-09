@@ -408,7 +408,16 @@ class Database:
             global_wr = (g["wins"] or 0) / (g["n"] or 1)
 
             adj_wr = (n * raw_wr + self.SHRINKAGE_K * global_wr) / (n + self.SHRINKAGE_K)
-            blocked = n >= self.BLOCK_MIN_TRADES and adj_wr < self.BLOCK_WR_THRESHOLD
+
+            # Check if manually blocked (don't auto-unblock manual blocks)
+            current = await conn.fetchrow(
+                "SELECT blocked FROM micro_theme_stats WHERE theme = $1", theme
+            )
+            currently_blocked = current["blocked"] if current else False
+
+            # Auto-block if bad WR, but never auto-unblock a manually blocked theme
+            should_block = n >= self.BLOCK_MIN_TRADES and adj_wr < self.BLOCK_WR_THRESHOLD
+            blocked = should_block or currently_blocked
 
             await conn.execute("""
                 INSERT INTO micro_theme_stats (theme, blocked, updated_at)
