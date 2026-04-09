@@ -606,27 +606,39 @@ async def check_position_price(ws_key: str, price: float, info: dict,
 
 # ── Time-based Exit Check ──
 
-async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
-    """Check expired positions via REST: resolved → proper payout, 72h past expiry → force close."""
+async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot,
+                                   active_market_ids: set = None):
+    """Check positions via REST: resolved → proper payout, 72h past expiry → force close.
+    Also checks positions whose market disappeared from active scan (closed/resolved early)."""
     open_pos = await db.get_open_positions()
     now = datetime.now(timezone.utc)
 
-    # Filter to expired positions only
-    expired = []
+    to_check = []
     for pos in open_pos:
         end_date_str = pos.get("end_date")
-        if not end_date_str:
-            continue
-        try:
-            end = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
-        except Exception:
-            continue
-        if now < end:
-            continue
-        pos["_hours_past"] = (now - end).total_seconds() / 3600
-        expired.append(pos)
+        hours_past = 0
+        is_expired = False
 
-    if not expired:
+        if end_date_str:
+            try:
+                end = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
+                if now >= end:
+                    hours_past = (now - end).total_seconds() / 3600
+                    is_expired = True
+            except Exception:
+                pass
+
+        # Market no longer in active scan → likely closed/resolved
+        gone_from_scan = (active_market_ids is not None
+                          and pos["market_id"] not in active_market_ids)
+
+        pos["_hours_past"] = hours_past
+        pos["_is_expired"] = is_expired
+
+        if is_expired or gone_from_scan:
+            to_check.append(pos)
+
+    if not to_check:
         return
 
     # Parallel REST fetch for all expired positions
@@ -637,9 +649,9 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
         except Exception:
             return None
 
-    market_data = await asyncio.gather(*[_fetch_market(p["market_id"]) for p in expired])
+    market_data = await asyncio.gather(*[_fetch_market(p["market_id"]) for p in to_check])
 
-    for pos, mdata in zip(expired, market_data):
+    for pos, mdata in zip(to_check, market_data):
         market_id = pos["market_id"]
         side = pos["side"]
         entry_price = pos["entry_price"]
@@ -682,8 +694,8 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot):
                 )
             continue
 
-        # 2. Force-close if 72h+ past expiry
-        if hours_past < 72:
+        # 2. Force-close if 72h+ past expiry (only for truly expired)
+        if not pos.get("_is_expired") or hours_past < 72:
             continue
 
         current_price = pos.get("current_price", entry_price)
@@ -938,13 +950,14 @@ async def main():
 
     async def _scan_cycle(scan_count, db, ws, tg, scanner):
         """One full scan cycle — wrapped in wait_for for timeout."""
-        # 1. Expired positions (check every scan)
-        await check_expired_positions(db, ws, tg)
-
-        # 2. Fetch candidates
+        # 1. Fetch candidates (also builds active market IDs set)
         direct, watchlist = await scanner.fetch_candidates()
 
-        # 3. Direct entries
+        # 2. Check expired + disappeared positions
+        await check_expired_positions(db, ws, tg,
+                                       active_market_ids=getattr(scanner, '_scanned_market_ids', None))
+
+        # 3. Direct entries (dynamic price: 1d→90¢, 2d→92¢, 3d→93¢, >3d→94¢)
         entered = 0
         _skip = {}
         for c in direct:

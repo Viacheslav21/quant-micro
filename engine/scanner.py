@@ -327,6 +327,7 @@ class MicroScanner:
         watchlist = []
         seen = set()
         skipped_no_date = 0
+        self._scanned_market_ids = set()  # all active market IDs from this scan
 
         try:
             import asyncio
@@ -345,6 +346,9 @@ class MicroScanner:
                     continue
                 batch = r.json() or []
                 all_markets.extend(batch)
+
+            # Track all active market IDs for stale position detection
+            self._scanned_market_ids = {str(m["id"]) for m in all_markets}
 
             # Build event siblings map (negRisk events: one YES → all others NO)
             _event_map: dict[str, list[dict]] = {}
