@@ -107,7 +107,7 @@ THEME_KEYWORDS = {
     # Commodities & markets
     "oil":        ["oil","opec","crude","brent","wti","petroleum","natural gas","lng"],
     "gold":       ["gold","xau","precious metal","silver","platinum"],
-    "crypto":     ["bitcoin","btc","crypto","ethereum","eth","solana","sol","dogecoin","doge","xrp",
+    "crypto":     ["bitcoin","btc","crypto","ethereum"," eth ","solana"," sol ","dogecoin","doge","xrp",
                    "ripple","cardano","polkadot","avalanche","chainlink","defi","nft","stablecoin",
                    "binance","coinbase","memecoin","altcoin","megaeth","microstrategy"],
     "stocks":     ["s&p","sp500","spx","nasdaq","dow jones","russell","stock market","ipo","earnings",

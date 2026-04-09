@@ -27,9 +27,14 @@ def read(f):
     return open(os.path.join(ROOT, f)).read()
 
 src_main = read("main.py")
+src_entry = read("engine/entry.py")
+src_monitor = read("engine/monitor.py")
+src_resolver = read("engine/resolver.py")
 src_scanner = read("engine/scanner.py")
 src_ws = read("engine/ws_client.py")
 src_db = read("utils/db.py")
+# Combined source for checks that span modules
+src_all = src_main + src_entry + src_monitor + src_resolver
 
 
 # ── 1. Config Defaults ──
@@ -54,12 +59,12 @@ check("MAX_DAYS_LEFT exists", find_config("MAX_DAYS_LEFT") is not None)
 # ── 2. SL / Safety Guards ──
 print("\n\033[1m2. SL & Safety\033[0m")
 
-check("SL disabled ≤1d: 'days_to_expiry > 1'", "days_to_expiry > 1" in src_main)
-check("Division by zero: entry_price guard", "entry_price > 0" in src_main or "max(entry_price" in src_main)
-check("Resolution loss: bid_price <= 0.01", "bid_price <= 0.01" in src_main)
-check("Sanity check: 50% drop filter", "entry_price * 0.5" in src_main)
-check("MAX_LOSS hard cap", "MAX_LOSS_PER_POS" in src_main)
-check("MAX_LOSS always enforced", "Hard max loss cap" in src_main or "ALWAYS enforced" in src_main)
+check("SL disabled ≤1d: 'days_to_expiry > 1'", "days_to_expiry > 1" in src_monitor)
+check("Division by zero: entry_price guard", "entry_price > 0" in src_monitor)
+check("Resolution loss: bid_price <= 0.01", "bid_price <= 0.01" in src_monitor)
+check("Sanity check: 50% drop filter", "entry_price * 0.5" in src_monitor)
+check("MAX_LOSS hard cap", "MAX_LOSS_PER_POS" in src_all)
+check("MAX_LOSS always enforced", "ALWAYS enforced" in src_monitor)
 
 
 # ── 3. Scanner Filters ──
@@ -82,24 +87,24 @@ check("neg_risk_id in candidate", "neg_risk_id" in src_scanner)
 # ── 4. Position Monitoring ──
 print("\n\033[1m4. Monitoring\033[0m")
 
-check("Resolution WIN: ≥99¢", "RESOLUTION_PRICE" in src_main)
-check("Resolution LOSS: ≤1¢", "resolved_loss" in src_main)
-check("SL with REST verify", "_verify_price_rest" in src_main)
-check("Volume confirm for SL", "_check_volume_confirms" in src_main)
-check("Expired position cleanup", "check_expired_positions" in src_main)
-check("Bid price for exit (not mid)", "best_bid" in src_main)
-check("Parallel REST for expired", "asyncio.gather" in src_main)
+check("Resolution WIN: ≥99¢", "RESOLUTION_PRICE" in src_all)
+check("Resolution LOSS: ≤1¢", "resolved_loss" in src_monitor)
+check("SL with REST verify", "_verify_price_rest" in src_monitor)
+check("Volume confirm for SL", "_check_volume_confirms" in src_monitor)
+check("Expired position cleanup", "check_expired_positions" in src_all)
+check("Bid price for exit (not mid)", "best_bid" in src_monitor)
+check("Parallel REST for expired", "asyncio.gather" in src_resolver)
 
 
 # ── 5. Telegram Messages ──
 print("\n\033[1m5. Telegram\033[0m")
 
-check("Entry: shows bankroll", "Банк:" in src_main or "bankroll" in src_main.lower())
-check("Entry: shows spread", "Spread:" in src_main or "spread" in src_main)
-check("Entry: shows SL status", "SL:" in src_main)
-check("Win: shows hold time", "hold_hours" in src_main or "Держали" in src_main)
-check("Win: shows PnL %", "pnl/stake" in src_main or "pnl_pct" in src_main)
-check("Loss: shows days to expiry", "days_to_expiry" in src_main)
+check("Entry: shows bankroll", "Банк:" in src_entry or "bankroll" in src_entry.lower())
+check("Entry: shows spread", "Spread:" in src_entry)
+check("Entry: shows SL status", "SL:" in src_entry)
+check("Win: shows hold time", "hold_hours" in src_monitor or "Держали" in src_monitor)
+check("Win: shows PnL %", "pnl/stake" in src_monitor or "pnl_pct" in src_monitor)
+check("Loss: shows days to expiry", "days_to_expiry" in src_monitor)
 
 
 # ── 6. DB & Data ──
@@ -122,12 +127,12 @@ check("Bankroll computed from positions", "starting_bankroll + total_pnl" in src
 # ── 7. Risk Management ──
 print("\n\033[1m7. Risk Management\033[0m")
 
-check("NegRisk group limit in entry", "neg_risk_id" in src_main)
-check("Dynamic entry in WS callback", "dynamic_entry_price" in src_main)
+check("NegRisk group limit in entry", "neg_risk_id" in src_entry)
+check("Dynamic entry in WS callback", "dynamic_entry_price" in src_entry)
 check("LISTEN config with reconnect", "reconnecting in" in src_main)
-check("Watchlist lookup by side", "get_watchlist_market(market_id, side)" in src_main)
-check("Event cascade", "check_event_cascade" in src_main)
-check("Theme diversification limit", "MAX_PER_THEME" in src_main)
+check("Watchlist lookup by side", "get_watchlist_market(market_id, side)" in src_entry)
+check("Event cascade", "check_event_cascade" in src_all)
+check("Theme diversification limit", "MAX_PER_THEME" in src_all)
 check("Config safe keys", "_SAFE_CONFIG_KEYS" in src_main)
 check("BANKROLL in safe keys", '"BANKROLL"' in src_main)
 
