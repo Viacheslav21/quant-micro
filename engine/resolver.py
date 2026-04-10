@@ -120,12 +120,43 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot,
                 )
             continue
 
+        # 2. Price-based resolution — API may lag with closed=false for hours
+        #    If REST price ≥99¢ our side → resolve (same threshold as monitor)
+        if mdata:
+            try:
+                op = mdata.get("outcomePrices")
+                if isinstance(op, str):
+                    op = json.loads(op)
+                if op:
+                    yes_p = float(op[0])
+                    no_p = float(op[1]) if len(op) > 1 else 1 - yes_p
+                    side_p = yes_p if side == "YES" else no_p
+                    if side_p >= 0.99 or side_p <= 0.01:
+                        won = side_p >= 0.99
+                        pnl = ((1.0 - entry_price) / entry_price) * stake if won else -stake
+                        result = "WIN" if won else "LOSS"
+                        closed = await db.close_position(pos["id"], round(pnl, 4), result, "resolved")
+                        if closed:
+                            ws.unmark_position(ws_key)
+                            _invalidate(ws_key)
+                            await db.recalibrate_theme(pos.get("theme", "other"))
+                            log.info(f"[RESOLVED BY PRICE] {result} {side} '{pos['question'][:40]}' side_p={side_p:.4f} PnL: ${pnl:.2f}")
+                            await tg.send(
+                                f"🔬 <b>MICRO</b> | 🏁 <b>RESOLVED {result}</b> {'✅' if won else '❌'}\n\n"
+                                f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
+                                f"📊 Вход: {entry_price*100:.1f}¢ | Цена: {side_p*100:.1f}¢\n"
+                                f"💰 PnL: <b>${pnl:.2f}</b>"
+                            )
+                        continue
+            except Exception:
+                pass
+
         # Not resolved — reset WS timestamp so stale check doesn't re-fire every scan
         ws_info = ws.prices.get(ws_key)
         if ws_info:
             ws_info["last_update"] = _time.time()
 
-        # 2. Force-close if 72h+ past expiry (only for truly expired)
+        # 3. Force-close if 72h+ past expiry (only for truly expired)
         if not pos.get("_is_expired") or hours_past < 72:
             continue
 
