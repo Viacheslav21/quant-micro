@@ -25,7 +25,7 @@ class Database:
 
     async def init(self):
         self.pool = await asyncpg.create_pool(
-            self.url, min_size=2, max_size=10, command_timeout=30
+            self.url, min_size=1, max_size=5, command_timeout=30
         )
         await self._create_schema()
         log.info("[DB] PostgreSQL connected")

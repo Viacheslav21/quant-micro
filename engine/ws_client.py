@@ -99,6 +99,13 @@ class MicroWS:
         info = self.prices.get(ws_key, {})
         return info.get("best_ask", 0) - info.get("best_bid", 0)
 
+    def cleanup_stale_checks(self):
+        """Remove expired watchlist check timestamps to prevent unbounded growth."""
+        now = time.time()
+        stale = [k for k, v in self._last_watchlist_check.items() if now - v > 3600]
+        for k in stale:
+            del self._last_watchlist_check[k]
+
     # ── Dispatch ──
 
     async def _dispatch(self, ws_key: str, info: dict):

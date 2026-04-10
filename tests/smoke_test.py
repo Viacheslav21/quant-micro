@@ -82,6 +82,10 @@ check("ENTRY_PRICE_2D configurable", "ENTRY_PRICE_2D" in src_scanner)
 check("ENTRY_PRICE_3D configurable", "ENTRY_PRICE_3D" in src_scanner)
 check("VS pattern for sports", "_VS_PATTERN" in src_scanner)
 check("neg_risk_id in candidate", "neg_risk_id" in src_scanner)
+check("Binary risk filter function", "def is_binary_risk" in src_scanner)
+check("Binary risk: up or down", "up or down" in src_scanner)
+check("Binary risk: between $ and $", "between" in src_scanner)
+check("Binary risk applied in fetch", "is_binary_risk" in src_scanner)
 
 
 # ── 4. Position Monitoring ──

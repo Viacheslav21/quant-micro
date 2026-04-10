@@ -134,6 +134,32 @@ check("min(base=0.89, 1d=0.90) → 0.89", dynamic_entry_price(0.5, 0.89) == 0.89
 
 
 # ══════════════════════════════════════
+# 1b. Binary Risk Filter
+# ══════════════════════════════════════
+print("\n\033[1m1b. Binary Risk Filter\033[0m")
+
+from engine.scanner import is_binary_risk
+
+# Should BLOCK
+check("Block: Up or Down", is_binary_risk("S&P 500 Up or Down on April 9?"))
+check("Block: Opens Up or Down", is_binary_risk("S&P Opens Up or Down on April 9?"))
+check("Block: Green or Red", is_binary_risk("Bitcoin Green or Red on April 7?"))
+check("Block: Higher or Lower", is_binary_risk("Higher or Lower: Nasdaq?"))
+check("Block: between $X and $Y", is_binary_risk("Will BTC be between $70,000 and $72,000?"))
+check("Block: between temp range", is_binary_risk("Will temp be between 20°C and 25°C?"))
+check("Block: between % range", is_binary_risk("Will inflation be between 2.5% and 3.0%?"))
+
+# Should ALLOW
+check("Allow: above $X", not is_binary_risk("Will Bitcoin be above $72,000?"))
+check("Allow: dip to $X", not is_binary_risk("Will Bitcoin dip to $64,000?"))
+check("Allow: reach $X", not is_binary_risk("Will Bitcoin reach $78,000?"))
+check("Allow: more than X°C", not is_binary_risk("Will temp increase by more than 1.29°C?"))
+check("Allow: highest temp be X°C", not is_binary_risk("Will highest temp in Tokyo be 20°C?"))
+check("Allow: Musk tweets", not is_binary_risk("Will Elon Musk post 280-299 tweets?"))
+check("Allow: increase by X%", not is_binary_risk("Will annual inflation increase by 3.1%?"))
+
+
+# ══════════════════════════════════════
 # 2. calc_stake
 # ══════════════════════════════════════
 print("\n\033[1m2. Stake Calculation\033[0m")

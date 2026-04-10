@@ -128,7 +128,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     days = candidate.get("days_left", "?")
     log.info(
         f"[ENTRY] {mode} {source.upper()} {side} '{question[:50]}' "
-        f"@ {entry_price:.2f}¢ ${stake:.2f} | ROI {roi:.1%} | SL {sl_pct:.0%} | "
+        f"@ {entry_price:.2f}¢ ${stake:.2f} | ROI {roi:.1%} | SL {'OFF' if (isinstance(days, (int, float)) and days <= 1) else f'{sl_pct:.0%}'} | "
         f"Q={quality:.0f} | {days}d left"
     )
 

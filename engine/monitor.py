@@ -17,6 +17,14 @@ _sl_rest_cooldown: dict = {}
 _SL_REST_COOLDOWN = 60  # seconds
 
 
+def cleanup_stale_cooldowns():
+    """Remove expired cooldown entries to prevent unbounded growth."""
+    now = time.time()
+    stale = [k for k, v in _sl_rest_cooldown.items() if now - v > 3600]
+    for k in stale:
+        del _sl_rest_cooldown[k]
+
+
 def _days_to_expiry(pos: dict) -> float:
     """Calculate days until position's market expires. Returns 999 if unknown."""
     from datetime import datetime, timezone
@@ -177,17 +185,16 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         return
 
     # ── Hard max loss cap — ALWAYS enforced ──
-    dollar_loss = pnl_pct * stake
     max_loss = config["MAX_LOSS_PER_POS"]
-    if dollar_loss <= -max_loss:
+    if pnl_dollar <= -max_loss:
         rest_price = await _verify_price_rest(http_client, market_id, side)
         if rest_price is not None:
             rest_pnl = ((rest_price - entry_price) / entry_price) * stake
             if rest_pnl > -max_loss:
-                log.info(f"[MAX LOSS BLOCKED] {market_id[:8]} WS loss=${dollar_loss:.2f} but REST=${rest_pnl:.2f} — not real")
+                log.info(f"[MAX LOSS BLOCKED] {market_id[:8]} WS loss=${pnl_dollar:.2f} but REST=${rest_pnl:.2f} — not real")
                 return
-            dollar_loss = rest_pnl
-        pnl = dollar_loss
+            pnl_dollar = rest_pnl
+        pnl = pnl_dollar
         closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "max_loss")
         if closed:
             ws.unmark_position(ws_key)
