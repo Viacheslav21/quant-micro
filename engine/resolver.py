@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import time as _time
 from datetime import datetime, timezone
 
 import httpx
@@ -41,14 +42,26 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot,
         gone_from_scan = (active_market_ids is not None
                           and pos["market_id"] not in active_market_ids)
 
+        # Stale WS: no price update in 5+ min — market may have resolved
+        # (WS stops sending events when trading halts on resolution)
+        ws_key = f"{pos['market_id']}_{pos.get('side', 'YES')}"
+        ws_info = ws.prices.get(ws_key)
+        ws_stale = (ws_info is not None
+                    and _time.time() - ws_info.get("last_update", 0) > 300)
+
         pos["_hours_past"] = hours_past
         pos["_is_expired"] = is_expired
 
-        if is_expired or gone_from_scan:
+        if is_expired or gone_from_scan or ws_stale:
             to_check.append(pos)
 
     if not to_check:
         return
+
+    stale_count = sum(1 for p in to_check if not p["_is_expired"]
+                      and (active_market_ids is None or p["market_id"] in (active_market_ids or set())))
+    if stale_count:
+        log.info(f"[RESOLVER] Checking {len(to_check)} positions ({stale_count} stale WS)")
 
     async def _fetch_market(mid):
         try:
@@ -106,6 +119,11 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot,
                     f"💰 PnL: <b>${pnl:.2f}</b>"
                 )
             continue
+
+        # Not resolved — reset WS timestamp so stale check doesn't re-fire every scan
+        ws_info = ws.prices.get(ws_key)
+        if ws_info:
+            ws_info["last_update"] = _time.time()
 
         # 2. Force-close if 72h+ past expiry (only for truly expired)
         if not pos.get("_is_expired") or hours_past < 72:
