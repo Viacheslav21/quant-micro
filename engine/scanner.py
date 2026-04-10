@@ -100,7 +100,8 @@ THEME_KEYWORDS = {
     "election":   ["election","vote","president","referendum","governor","mayor","minister","parliament",
                    "primary","caucus","midterm","ballot","polling","swing state","electoral",
                    "presidential","nominee","running mate","party win","fidesz","tisza",
-                   "democrat","republican","gop","congress","senate"],
+                   "democrat","republican","gop","congress","senate","labour","conservative party",
+                   "liberal party","coalition","seats in"],
     "usgov":      ["doge","government shutdown","federal budget","pentagon","cia","fbi","doj",
                    "secretary of state","cabinet","impeach","pardon","classified","dhs"],
 
@@ -133,11 +134,13 @@ THEME_KEYWORDS = {
     "health":     ["covid","pandemic","vaccine","fda","who ","disease","outbreak",
                    "bird flu","h5n1","monkeypox","drug","pharma"],
     "climate":    ["climate","hurricane","earthquake","wildfire","flood","weather","tornado",
-                   "temperature","emissions","carbon"],
+                   "temperature","emissions","carbon","rain ","snow ","wind speed"],
     "legal":      ["court","ruling","lawsuit","indictment","trial","verdict","conviction",
                    "acquittal","sentence","extradition","arrest","charged"],
+    "music":      ["billboard","spotify","album release","#1 album","#1 song","grammy",
+                   "top 100","hot 100","billboard 200"],
     "film":       ["box office","movie","film","oscar","opening weekend",
-                   "grammy","emmy","golden globe","netflix","disney","streaming"],
+                   "emmy","golden globe","netflix","disney","streaming"],
 
     # Regions
     "europe":     ["eu ","european","macron","scholz","starmer","brexit","ecb",
@@ -215,6 +218,24 @@ def _parse_date_from_question(question: str):
 
 
 _VS_PATTERN = re.compile(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+vs\.?\s+[A-Z][a-z]+")
+_WIN_ON_DATE = re.compile(r"Will .+ win on 20\d{2}-\d{2}-\d{2}", re.IGNORECASE)
+
+# Markets where price can jump to 0 instantly (no gradual decline for SL to catch)
+_BINARY_RISK_PATTERNS = [
+    re.compile(r"up or down", re.I),                    # "S&P Up or Down" — coin flip
+    re.compile(r"opens up or down", re.I),              # "Opens Up or Down"
+    re.compile(r"green or red", re.I),                  # "Green or Red"
+    re.compile(r"higher or lower", re.I),               # "Higher or Lower"
+    re.compile(r"between.*\$[\d,]+.*and.*\$[\d,]+", re.I),  # "between $70k and $72k" — range bet
+    re.compile(r"between.*\d+[°ºc].*and.*\d+[°ºc]", re.I),  # "between 20°C and 25°C" — temp range
+    re.compile(r"between.*\d+%.*and.*\d+%", re.I),     # "between 2.5% and 3.0%" — rate range
+]
+
+
+def is_binary_risk(question: str) -> bool:
+    """Check if market can lose entire stake instantly (no gradual price decline).
+    These markets resolve to 0 without intermediate prices for SL to catch."""
+    return any(p.search(question) for p in _BINARY_RISK_PATTERNS)
 
 
 def dynamic_entry_price(days_left: float, base_price: float, config: dict = None) -> float:
@@ -237,6 +258,9 @@ def classify_theme(question: str) -> str:
             return theme
     # "Team Name vs. Team Name" pattern → sports
     if _VS_PATTERN.search(question):
+        return "sports"
+    # "Will X win on 2026-04-07?" pattern → sports (club matches without keywords)
+    if _WIN_ON_DATE.search(question):
         return "sports"
     return "other"
 
@@ -421,9 +445,13 @@ class MicroScanner:
                 if days_left < 0:
                     skipped_no_date += 1
                     if yes_price >= 0.90 or no_price >= 0.90:
-                        log.info(f"[NO-DATE] {question[:60]} | YES={yes_price:.2f} NO={no_price:.2f}")
+                        log.info(f"[NO-DATE] {question[:60]} | YES={yes_price:.2f} NO={no_price:.2f} | endDate={end_str}")
                     continue
                 if days_left > max_days:
+                    continue
+
+                # Skip binary risk markets (can lose entire stake instantly)
+                if is_binary_risk(question):
                     continue
 
                 spread = float(m.get("spread") or 0)
