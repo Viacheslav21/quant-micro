@@ -165,9 +165,9 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             )
         return
 
-    # ── Resolution: ≥99¢ (WIN) ──
+    # ── Resolution: ≥99¢ (WIN) — payout is $1.00, not bid_price ──
     if bid_price >= config["RESOLUTION_PRICE"]:
-        pnl = ((bid_price - entry_price) / entry_price) * stake
+        pnl = ((1.0 - entry_price) / entry_price) * stake
         closed = await db.close_position(pos["id"], round(pnl, 4), "WIN", "resolved")
         if closed:
             ws.unmark_position(ws_key)
