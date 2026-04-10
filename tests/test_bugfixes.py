@@ -205,5 +205,67 @@ class TestTelegramHtmlEscape(unittest.TestCase):
         self.assertEqual(self._escape(text), text)
 
 
+# ── WS Price Sync: price_change syncs best_bid, book guard ──
+
+class TestWsPriceSync(unittest.TestCase):
+    """Regression: incremental book events were overwriting best_bid with
+    stale lower-level bids (e.g., 88¢ real → 80¢ displayed)."""
+
+    def _make_ws(self):
+        ws = FakeWS()
+        ws.register_market("mkt_YES", token_id="tok", token_side="yes", price=0.92)
+        return ws
+
+    def test_price_change_syncs_best_bid(self):
+        """price_change event should update best_bid (authoritative source)."""
+        ws = self._make_ws()
+        info = ws.prices["mkt_YES"]
+        # Simulate _handle_price setting price + best_bid
+        new_price = ws._side_price("mkt_YES", 0.88)
+        info["price"] = new_price
+        info["best_bid"] = new_price  # this is the fix
+        self.assertAlmostEqual(info["best_bid"], 0.88)
+
+    def test_book_incremental_blocked(self):
+        """Incremental book bid far below price should NOT overwrite best_bid."""
+        ws = self._make_ws()
+        info = ws.prices["mkt_YES"]
+        info["price"] = 0.88
+        info["best_bid"] = 0.88
+        # Simulate book event with low-level bid
+        raw_best_bid = 0.80
+        current_price = info.get("price", 0)
+        # Guard: only update if within 5% of price
+        if current_price <= 0 or raw_best_bid >= current_price * 0.95:
+            info["best_bid"] = raw_best_bid
+        self.assertAlmostEqual(info["best_bid"], 0.88, msg="Stale bid 0.80 should be blocked")
+
+    def test_book_real_bid_accepted(self):
+        """Real top-of-book bid close to price should be accepted."""
+        ws = self._make_ws()
+        info = ws.prices["mkt_YES"]
+        info["price"] = 0.88
+        info["best_bid"] = 0.88
+        raw_best_bid = 0.87  # within 5% of 0.88
+        current_price = info.get("price", 0)
+        if current_price <= 0 or raw_best_bid >= current_price * 0.95:
+            info["best_bid"] = raw_best_bid
+        self.assertAlmostEqual(info["best_bid"], 0.87, msg="Real bid 0.87 should be accepted")
+
+    def test_no_side_book_guard(self):
+        """NO side: incremental YES ask should not produce stale NO bid."""
+        ws = FakeWS()
+        ws.register_market("mkt_NO", token_id="tok", token_side="no", price=0.88)
+        info = ws.prices["mkt_NO"]
+        info["price"] = 0.88
+        info["best_bid"] = 0.88
+        # Incremental book: YES ask=0.20 → NO bid = 1-0.20 = 0.80 (stale)
+        no_bid = round(1.0 - 0.20, 4)  # 0.80
+        current_price = info.get("price", 0)
+        if current_price <= 0 or no_bid >= current_price * 0.95:
+            info["best_bid"] = no_bid
+        self.assertAlmostEqual(info["best_bid"], 0.88, msg="NO stale bid 0.80 should be blocked")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

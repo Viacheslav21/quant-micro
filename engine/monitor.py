@@ -67,8 +67,9 @@ async def _verify_price_rest(http_client: httpx.AsyncClient, market_id: str, sid
             return None
         if isinstance(raw, str):
             raw = json.loads(raw)
-        yes_p = float(raw[0])
-        return round(1.0 - yes_p, 4) if side == "NO" else round(yes_p, 4)
+        if side == "NO" and len(raw) > 1:
+            return round(float(raw[1]), 4)
+        return round(float(raw[0]), 4)
     except Exception as e:
         log.warning(f"[REST] Price verify failed for {market_id[:8]}: {e}")
         return None
@@ -195,6 +196,8 @@ async def check_position_price(ws_key: str, price: float, info: dict,
                 return
             pnl_dollar = rest_pnl
         pnl = pnl_dollar
+        # Sim: exit slippage + fee
+        pnl -= config.get("SLIPPAGE", 0) * stake / entry_price + stake * config.get("FEE_PCT", 0)
         closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "max_loss")
         if closed:
             ws.unmark_position(ws_key)
@@ -230,7 +233,13 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         if not vol_confirms:
             log.info(f"[SL VOL BLOCKED] {market_id[:8]} {side} pnl={pnl_pct:+.1%} but low volume — skipping SL")
             return
-        pnl = pnl_pct * stake
+        # Use REST price for PnL when available (more accurate than WS bid)
+        if rest_price is not None:
+            pnl = ((rest_price - entry_price) / entry_price) * stake
+        else:
+            pnl = pnl_pct * stake
+        # Sim: exit slippage + fee (real sell would be worse)
+        pnl -= config.get("SLIPPAGE", 0) * stake / entry_price + stake * config.get("FEE_PCT", 0)
         closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "stop_loss")
         if closed:
             ws.unmark_position(ws_key)
@@ -261,7 +270,13 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         if rest_price is not None and rest_price >= entry_price - 0.07:
             log.info(f"[RAPID DROP BLOCKED] {market_id[:8]} {side} WS bid={bid_price:.4f} but REST={rest_price:.4f} — not a real drop")
             return
-        pnl = pnl_pct * stake
+        # Use REST price for PnL when available (more accurate than WS bid)
+        if rest_price is not None:
+            pnl = ((rest_price - entry_price) / entry_price) * stake
+        else:
+            pnl = pnl_pct * stake
+        # Sim: exit slippage + fee
+        pnl -= config.get("SLIPPAGE", 0) * stake / entry_price + stake * config.get("FEE_PCT", 0)
         closed = await db.close_position(pos["id"], round(pnl, 4), "LOSS", "rapid_drop")
         if closed:
             ws.unmark_position(ws_key)

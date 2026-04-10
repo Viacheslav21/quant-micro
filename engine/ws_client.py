@@ -265,6 +265,9 @@ class MicroWS:
                 continue
 
             info["price"] = new_price
+            # Sync best_bid from authoritative price — book events are incremental
+            # and can set stale lower bids from non-top levels
+            info["best_bid"] = new_price
             info["last_update"] = time.time()
             await self._dispatch(ws_key, info)
 
@@ -299,9 +302,14 @@ class MicroWS:
 
             invert = self._key_invert.get(ws_key, False)
 
+            current_price = info.get("price", 0)
+
             if not invert:
                 if raw_best_bid > 0:
-                    info["best_bid"] = raw_best_bid
+                    # Guard: incremental book events may only contain lower-level bids.
+                    # Don't let best_bid drop >5% below latest price from price_change.
+                    if current_price <= 0 or raw_best_bid >= current_price * 0.95:
+                        info["best_bid"] = raw_best_bid
                 if raw_best_ask > 0:
                     info["best_ask"] = raw_best_ask
             else:
@@ -309,9 +317,10 @@ class MicroWS:
                 # NO bid = 1 - YES ask (what we'd get selling NO)
                 # NO ask = 1 - YES bid (what we'd pay buying NO)
                 if raw_best_ask > 0:
-                    info["best_bid"] = round(1.0 - raw_best_ask, 4)
+                    no_bid = round(1.0 - raw_best_ask, 4)
+                    if current_price <= 0 or no_bid >= current_price * 0.95:
+                        info["best_bid"] = no_bid
                 if raw_best_bid > 0:
-                    info["best_bid_from_book"] = True
                     info["best_ask"] = round(1.0 - raw_best_bid, 4)
 
             # Sanity check: bid/ask must be in valid range and bid < ask

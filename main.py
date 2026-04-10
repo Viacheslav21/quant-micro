@@ -50,6 +50,8 @@ CONFIG = {
     "SCAN_PAGES":         int(os.getenv("SCAN_PAGES", "16")),
     "MIN_VOLUME":         float(os.getenv("MIN_VOLUME", "50000")),
     "MIN_QUALITY_SCORE":  float(os.getenv("MIN_QUALITY_SCORE", "40")),
+    "SLIPPAGE":           float(os.getenv("SLIPPAGE", "0.005")),    # 0.5¢ per side
+    "FEE_PCT":            float(os.getenv("FEE_PCT", "0.02")),      # 2% round-trip fee
 }
 
 # ── Logging ──
@@ -77,7 +79,7 @@ _SAFE_CONFIG_KEYS = {
     "SL_PCT", "RAPID_DROP_PCT", "MAX_LOSS_PER_POS",
     "MAX_STAKE", "MIN_STAKE", "MAX_OPEN", "MAX_PER_THEME",
     "MAX_DAYS_LEFT", "MIN_VOLUME", "SCAN_INTERVAL", "CONFIG_TAG", "MAX_PER_NEG_RISK",
-    "BANKROLL",
+    "BANKROLL", "SLIPPAGE", "FEE_PCT",
 }
 
 

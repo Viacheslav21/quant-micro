@@ -370,9 +370,55 @@ check(f"Q(91¢, 7d, 20k) = {q4:.0f} low", q4 < 30)
 
 
 # ══════════════════════════════════════
-# 8. Shutdown stops callbacks
+# 8. Realistic Sim Costs (slippage + fees)
 # ══════════════════════════════════════
-print("\n\033[1m8. Shutdown Guard\033[0m")
+print("\n\033[1m8. Sim Costs\033[0m")
+
+# Entry slippage: entry_price should be best_ask + SLIPPAGE
+SIM_CONFIG = {**BASE_CONFIG, "SLIPPAGE": 0.005, "FEE_PCT": 0.02}
+candidate_sim = {**BASE_CANDIDATE, "best_ask": 0.94}
+db = MockDB()
+run(try_enter(candidate_sim, db, MockWS(), MockTG(), SIM_CONFIG))
+check("Entry slippage: 94¢ + 0.5¢ = 94.5¢",
+      db.saved and abs(db.saved[0]["entry_price"] - 0.945) < 0.001,
+      f"got {db.saved[0]['entry_price'] if db.saved else 'none'}")
+
+# Slippage can push ROI below MIN_ROI → rejected
+candidate_edge = {**BASE_CANDIDATE, "best_ask": 0.98}  # ROI without slip: 2.04%, with slip: 1.52%
+result = run(try_enter(candidate_edge, MockDB(), MockWS(), MockTG(), SIM_CONFIG))
+check("Entry slippage: 98¢+0.5¢ → ROI too low → rejected", result == "low_roi", f"got {result}")
+
+# Zero slippage = backwards compatible
+ZERO_CONFIG = {**BASE_CONFIG, "SLIPPAGE": 0, "FEE_PCT": 0}
+candidate_zero = {**BASE_CANDIDATE, "best_ask": 0.94}
+db = MockDB()
+run(try_enter(candidate_zero, db, MockWS(), MockTG(), ZERO_CONFIG))
+check("Zero slippage: entry_price = best_ask",
+      db.saved and db.saved[0]["entry_price"] == 0.94,
+      f"got {db.saved[0]['entry_price'] if db.saved else 'none'}")
+
+# MAX_LOSS with fee: PnL should include fee deduction
+POS_SIM = {**POS, "entry_price": 0.945}  # after slippage
+db = MockDB(open_positions=[POS_SIM])
+pos_cache = {"mkt1_YES": POS_SIM.copy()}
+run(check_position_price("mkt1_YES", 0.80, {"best_bid": 0.80},
+    db, MockWS(), MockTG(), SIM_CONFIG, None, pos_cache, {}, False))
+if db.closed:
+    # PnL without costs: (0.80 - 0.945) / 0.945 * 20 = -3.07
+    # Costs: slippage_exit = 0.005 * 20 / 0.945 = 0.106 + fee = 0.02 * 20 = 0.40
+    # Total PnL ≈ -3.07 - 0.51 = -3.58
+    pnl = db.closed[0]["pnl"]
+    check(f"MAX_LOSS with fees: PnL={pnl:.2f} < -3.0 (includes costs)", pnl < -3.0, f"pnl={pnl:.2f}")
+    # Without fees it would be -3.07, with fees it should be worse
+    check(f"MAX_LOSS fee impact: PnL={pnl:.2f} < -3.5", pnl < -3.5, f"pnl={pnl:.2f}")
+else:
+    check("MAX_LOSS with fees: position closed", False, "not closed")
+
+
+# ══════════════════════════════════════
+# 9. Shutdown stops callbacks
+# ══════════════════════════════════════
+print("\n\033[1m9. Shutdown Guard\033[0m")
 
 db = MockDB(open_positions=[POS])
 pos_cache = {"mkt1_YES": POS.copy()}

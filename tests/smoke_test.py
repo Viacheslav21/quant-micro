@@ -141,8 +141,28 @@ check("Config safe keys", "_SAFE_CONFIG_KEYS" in src_main)
 check("BANKROLL in safe keys", '"BANKROLL"' in src_main)
 
 
-# ── 8. ROI Math ──
-print("\n\033[1m8. ROI Math\033[0m")
+# ── 8. Realistic Sim Costs ──
+print("\n\033[1m8. Sim Costs\033[0m")
+
+check("SLIPPAGE config exists", find_config("SLIPPAGE") is not None)
+check("FEE_PCT config exists", find_config("FEE_PCT") is not None)
+check("SLIPPAGE in safe keys", "SLIPPAGE" in src_main and "_SAFE_CONFIG_KEYS" in src_main)
+check("FEE_PCT in safe keys", "FEE_PCT" in src_main and "_SAFE_CONFIG_KEYS" in src_main)
+check("Slippage applied at entry", "SLIPPAGE" in src_entry)
+check("Fee applied at SL exit", "FEE_PCT" in src_monitor)
+check("Fee applied at rapid_drop exit", src_monitor.count("FEE_PCT") >= 2, f"FEE_PCT appears {src_monitor.count('FEE_PCT')}x (need ≥2: SL+rapid_drop)")
+check("Fee applied at max_loss exit", src_monitor.count("FEE_PCT") >= 3, f"FEE_PCT appears {src_monitor.count('FEE_PCT')}x (need ≥3: SL+rapid+max)")
+
+# ── 8b. WS Price Sync ──
+print("\n\033[1m8b. WS Price Sync\033[0m")
+
+check("price_change syncs best_bid", 'info["best_bid"] = new_price' in src_ws)
+check("Book guard: incremental bid blocked", "current_price * 0.95" in src_ws)
+check("REST uses raw[1] for NO", "raw[1]" in src_monitor)
+
+
+# ── 9. ROI Math ──
+print("\n\033[1m9. ROI Math\033[0m")
 
 for price, expected_min in [(0.90, 0.10), (0.92, 0.08), (0.94, 0.06), (0.97, 0.03), (0.99, 0.009)]:
     roi = (1.0 - price) / price
@@ -154,8 +174,8 @@ check("Dynamic 2d: 0.92", 0.92 <= 0.94)
 check("Dynamic 3d: 0.93", 0.93 <= 0.94)
 
 
-# ── 9. WS Client ──
-print("\n\033[1m9. WS Client\033[0m")
+# ── 10. WS Client ──
+print("\n\033[1m10. WS Client\033[0m")
 
 check("Auto-reconnect", "reconnect" in src_ws.lower() or "RECONNECT_DELAY" in src_ws)
 check("Heartbeat", "PING" in src_ws or "heartbeat" in src_ws.lower())

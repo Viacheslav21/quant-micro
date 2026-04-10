@@ -14,7 +14,7 @@ cp .env.example .env  # edit with real credentials
 python main.py
 ```
 
-Tests: `python tests/smoke_test.py` (77 offline source code checks) + `python tests/test_logic.py` (68 unit tests with mocked DB/WS/Telegram — tests entry rejections, dynamic pricing, binary risk filter, SL, resolution, MAX_LOSS). No linter configured. Logging to stdout. Deployed via Railway (`Procfile: worker: python main.py`).
+Tests: `python tests/smoke_test.py` (88 offline source code checks) + `python tests/test_logic.py` (73 unit tests with mocked DB/WS/Telegram — tests entry rejections, dynamic pricing, binary risk filter, SL, resolution, MAX_LOSS, sim costs) + `python tests/test_bugfixes.py` (18 regression tests — WS multi-key, NO price, year rollover, HTML escaping, WS price sync). No linter configured. Logging to stdout. Deployed via Railway (`Procfile: worker: python main.py`).
 
 ## Architecture
 
@@ -71,6 +71,9 @@ Polymarket API → Scanner (every 2 min, 1600 markets max)
 - **Theme Auto-Block**: Bayesian shrinkage (k=20) tracks per-theme WR. Themes with adjusted WR < 40% after 10+ trades are auto-blocked. Recalibrated on every position close. Sports/esports blocked by default.
 - **Volume-Confirmed SL**: SL is skipped if 24h volume < $5k (low volume = noise, not a real move).
 - **Event Cascade**: When a negRisk market resolves YES, automatically enter NO on sibling markets in the same event group (via `event_siblings` map). Exploits the fact that if one outcome in a mutually exclusive group wins, the rest must lose.
+- **Realistic Sim Costs**: Entry slippage (`SLIPPAGE`, default 0.5¢) added to entry_price — simulates worse fill than quoted bestAsk. Exit slippage + round-trip fee (`FEE_PCT`, default 2%) deducted from PnL on early exits (SL, rapid drop, MAX_LOSS). Resolution payouts have no exit costs (automatic settlement). Both configurable via dashboard.
+- **WS Price Sync**: `price_change` events (authoritative) sync `best_bid` on every update. `book` events (incremental) are guarded: `best_bid` cannot drop >5% below latest `price` from stale lower-level order book updates. Prevents 5-10¢ phantom price drops in dashboard display.
+- **REST PnL on Exit**: SL, rapid drop, and MAX_LOSS use REST-verified price for PnL calculation when available (not stale WS bid). REST `outcomePrices[1]` used directly for NO side (not recalculated as `1 - YES`).
 
 ### Database Tables (owned by quant-micro)
 
@@ -90,6 +93,7 @@ Config loaded from environment variables at startup, then overridden at runtime 
 - **Filters**: `MAX_DAYS_LEFT`, `MIN_VOLUME`
 - **Timing**: `SCAN_INTERVAL`
 - **General**: `BANKROLL`, `CONFIG_TAG`
+- **Sim Costs**: `SLIPPAGE` (default 0.005 = 0.5¢ per side), `FEE_PCT` (default 0.02 = 2% round-trip)
 
 ### Risk Management
 
@@ -110,3 +114,4 @@ Config loaded from environment variables at startup, then overridden at runtime 
 - **Atomic close**: `WHERE status='open' RETURNING id` prevents double-close
 - **Volume-confirmed SL**: Low-volume drops (<$5k 24h) treated as noise, SL skipped
 - **Event cascade**: NegRisk YES resolution triggers automatic NO entry on sibling markets
+- **Sim cost modeling**: Entry slippage (0.5¢), exit slippage + fee (2%) on early exits — PnL ~15-30% more conservative than raw prices

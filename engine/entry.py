@@ -66,6 +66,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     entry_price = candidate.get("best_ask") or candidate["price"]
     if entry_price <= 0:
         entry_price = candidate["price"]
+    entry_price = min(entry_price + config.get("SLIPPAGE", 0), 0.99)  # sim: worse fill
 
     roi = (1.0 - entry_price) / entry_price
     if roi < config["MIN_ROI"]:
