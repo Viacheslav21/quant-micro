@@ -85,7 +85,11 @@ THEME_KEYWORDS = {
                    "parivision","fut esports","b8 vs","3dmax","fokus vs","wildcard",
                    "astralis","bc.game","voca","mongolz",
                    "(bo1)","(bo3)","(bo5)","bo1","bo3","bo5",
-                   "map winner","map 1 winner","map 2 winner","map 3 winner","map handicap"],
+                   "map winner","map 1 winner","map 2 winner","map 3 winner","map handicap",
+                   # LoL teams & patterns
+                   "lol:","lol ","top esports","jd gaming","nongshim","kiwoom","drx",
+                   "t1 vs","geng","hanwha","kt rolster","dplus","game 2 winner",
+                   "game 3 winner","game 1 winner"],
 
     # Geopolitics & conflicts
     "iran":       ["iran","iranian","tehran","nuclear iran","iaea","persian gulf","strait of hormuz",

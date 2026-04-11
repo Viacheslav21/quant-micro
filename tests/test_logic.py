@@ -362,12 +362,12 @@ run(check_position_price("mkt1_YES", 0.94, {"best_bid": 0.94},
     db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, pos_writes, False))
 check("Normal price: no close", len(db.closed) == 0)
 
-# Sanity: ignore bad tick (50% drop)
+# Large drop: MAX_LOSS catches it (no sanity filter blocking)
 db = MockDB(open_positions=[POS])
 pos_cache = {"mkt1_YES": POS.copy()}
 run(check_position_price("mkt1_YES", 0.40, {"best_bid": 0.40},
     db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, pos_writes, False))
-check("Sanity: ignore 50%+ drop", len(db.closed) == 0)
+check("Large drop: MAX_LOSS triggers", len(db.closed) == 1 and db.closed[0]["reason"] == "max_loss")
 
 
 # ══════════════════════════════════════
@@ -460,9 +460,141 @@ else:
 
 
 # ══════════════════════════════════════
-# 9. Shutdown stops callbacks
+# 9. Shared Utilities
 # ══════════════════════════════════════
-print("\n\033[1m9. Shutdown Guard\033[0m")
+print("\n\033[1m9. Shared Utilities\033[0m")
+
+from engine.shared import calc_days_left, parse_outcome_prices, calc_exit_fee
+
+# calc_days_left
+check("calc_days_left: future → >0", calc_days_left("2027-01-01T00:00:00Z") > 0)
+check("calc_days_left: past → 0", calc_days_left("2020-01-01T00:00:00Z") == 0)
+check("calc_days_left: None → 999", calc_days_left(None) == 999)
+check("calc_days_left: None → custom fallback", calc_days_left(None, fallback=5.0) == 5.0)
+check("calc_days_left: invalid → fallback", calc_days_left("not-a-date") == 999)
+check("calc_days_left: Z suffix handled", calc_days_left("2027-06-01T00:00:00Z") > 0)
+
+# parse_outcome_prices
+y, n = parse_outcome_prices({"outcomePrices": '["0.95","0.05"]'})
+check("parse_prices: dict/str", abs(y - 0.95) < 0.01 and abs(n - 0.05) < 0.01)
+y, n = parse_outcome_prices({"outcomePrices": [0.92, 0.08]})
+check("parse_prices: dict/list", abs(y - 0.92) < 0.01 and abs(n - 0.08) < 0.01)
+y, n = parse_outcome_prices({"yes_price": 0.90, "no_price": 0.10})
+check("parse_prices: fallback yes/no", abs(y - 0.90) < 0.01 and abs(n - 0.10) < 0.01)
+y, n = parse_outcome_prices({"outcomePrices": [0.75]})
+check("parse_prices: single → no=1-yes", abs(n - 0.25) < 0.01)
+y, n = parse_outcome_prices({})
+check("parse_prices: empty → 0,0", y == 0 and n == 0)
+y, n = parse_outcome_prices(None)
+check("parse_prices: None → 0,0", y == 0 and n == 0)
+
+# calc_exit_fee
+fee = calc_exit_fee(20.0, 0.95, {"SLIPPAGE": 0.005, "FEE_PCT": 0.02})
+check(f"calc_exit_fee: ~0.51 (got {fee:.3f})", 0.50 < fee < 0.52)
+check("calc_exit_fee: zero config → 0", calc_exit_fee(20.0, 0.95, {}) == 0)
+fee_z = calc_exit_fee(20.0, 0.0, {"SLIPPAGE": 0.005, "FEE_PCT": 0.02})
+check("calc_exit_fee: zero entry → fee only", abs(fee_z - 0.40) < 0.01)
+
+
+# ══════════════════════════════════════
+# 10. SL / Rapid Drop Behavior
+# ══════════════════════════════════════
+print("\n\033[1m10. SL & Rapid Drop\033[0m")
+
+from engine.monitor import _rest_cooldown
+from datetime import datetime, timezone, timedelta
+
+# -- SL disabled near expiry (≤1 day) --
+near_end = (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat()
+POS_NEAR = {**POS, "end_date": near_end, "sl_pct": 0.07}
+db = MockDB(open_positions=[POS_NEAR])
+pos_cache = {"mkt1_YES": POS_NEAR.copy()}
+_rest_cooldown.clear()
+# bid=0.85 → pnl=-10.5% > SL=7%, but ≤1 day → disabled. MAX_LOSS: -$2.11 < $3 cap → no trigger
+run(check_position_price("mkt1_YES", 0.85, {"best_bid": 0.85},
+    db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, {}, False))
+check("SL disabled ≤1d: no close", len(db.closed) == 0)
+
+# -- SL fires when >1 day to expiry --
+far_end = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
+POS_FAR = {**POS, "end_date": far_end, "sl_pct": 0.07}
+db = MockDB(open_positions=[POS_FAR])
+pos_cache = {"mkt1_YES": POS_FAR.copy()}
+_rest_cooldown.clear()
+# bid=0.85 → pnl=-10.5% > SL=7%, >1 day → fires
+run(check_position_price("mkt1_YES", 0.85, {"best_bid": 0.85},
+    db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, {}, False))
+check("SL fires >1d", len(db.closed) == 1 and db.closed[0]["reason"] == "stop_loss")
+
+# -- SL with fees --
+POS_FAR_SIM = {**POS, "end_date": far_end, "sl_pct": 0.07, "entry_price": 0.945}
+db = MockDB(open_positions=[POS_FAR_SIM])
+pos_cache = {"mkt1_YES": POS_FAR_SIM.copy()}
+_rest_cooldown.clear()
+SIM_C = {**BASE_CONFIG, "SLIPPAGE": 0.005, "FEE_PCT": 0.02}
+run(check_position_price("mkt1_YES", 0.85, {"best_bid": 0.85},
+    db, MockWS(), MockTG(), SIM_C, None, pos_cache, {}, False))
+if db.closed:
+    sl_pnl = db.closed[0]["pnl"]
+    raw_pnl = (0.85 - 0.945) / 0.945 * 20  # -2.01
+    check(f"SL with fees: PnL={sl_pnl:.2f} < raw {raw_pnl:.2f} (fees deducted)", sl_pnl < raw_pnl)
+else:
+    check("SL with fees: position closed", False, "not closed")
+
+# -- Rapid drop triggers when >1 day --
+POS_RD = {**POS, "end_date": far_end, "sl_pct": 0.20}  # high SL so only rapid_drop triggers
+db = MockDB(open_positions=[POS_RD])
+pos_cache = {"mkt1_YES": POS_RD.copy()}
+_rest_cooldown.clear()
+# bid=0.87 → drop = 0.95 - 0.87 = 8¢ > 7¢ default, pnl=-8.4% < SL=20%
+run(check_position_price("mkt1_YES", 0.87, {"best_bid": 0.87},
+    db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, {}, False))
+check("Rapid drop fires >1d (8¢ drop)", len(db.closed) == 1 and db.closed[0]["reason"] == "rapid_drop")
+
+# -- Rapid drop disabled near expiry --
+POS_RD_NEAR = {**POS, "end_date": near_end, "sl_pct": 0.20}
+db = MockDB(open_positions=[POS_RD_NEAR])
+pos_cache = {"mkt1_YES": POS_RD_NEAR.copy()}
+_rest_cooldown.clear()
+run(check_position_price("mkt1_YES", 0.87, {"best_bid": 0.87},
+    db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, {}, False))
+check("Rapid drop disabled ≤1d: no close", len(db.closed) == 0)
+
+# -- RAPID_DROP_PCT from config --
+CUSTOM_RD = {**BASE_CONFIG, "RAPID_DROP_PCT": 0.10}  # 10¢ instead of 7¢
+POS_RD2 = {**POS, "end_date": far_end, "sl_pct": 0.20}
+db = MockDB(open_positions=[POS_RD2])
+pos_cache = {"mkt1_YES": POS_RD2.copy()}
+_rest_cooldown.clear()
+# 8¢ drop < 10¢ threshold → no trigger
+run(check_position_price("mkt1_YES", 0.87, {"best_bid": 0.87},
+    db, MockWS(), MockTG(), CUSTOM_RD, None, pos_cache, {}, False))
+check("RAPID_DROP_PCT=10¢: 8¢ drop → no close", len(db.closed) == 0)
+
+# 11¢ drop > 10¢ threshold → triggers
+db = MockDB(open_positions=[POS_RD2])
+pos_cache = {"mkt1_YES": POS_RD2.copy()}
+_rest_cooldown.clear()
+run(check_position_price("mkt1_YES", 0.84, {"best_bid": 0.84},
+    db, MockWS(), MockTG(), CUSTOM_RD, None, pos_cache, {}, False))
+check("RAPID_DROP_PCT=10¢: 11¢ drop → triggers", len(db.closed) == 1 and db.closed[0]["reason"] == "rapid_drop")
+
+# -- SL priority over rapid drop: both triggered → SL fires --
+POS_BOTH = {**POS, "end_date": far_end, "sl_pct": 0.07}
+db = MockDB(open_positions=[POS_BOTH])
+pos_cache = {"mkt1_YES": POS_BOTH.copy()}
+_rest_cooldown.clear()
+# bid=0.85 → pnl=-10.5%>SL=7%, drop=10¢>7¢ — both triggered, SL wins
+run(check_position_price("mkt1_YES", 0.85, {"best_bid": 0.85},
+    db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, {}, False))
+check("SL priority: both triggered → stop_loss",
+      len(db.closed) == 1 and db.closed[0]["reason"] == "stop_loss")
+
+
+# ══════════════════════════════════════
+# 11. Shutdown stops callbacks
+# ══════════════════════════════════════
+print("\n\033[1m11. Shutdown Guard\033[0m")
 
 db = MockDB(open_positions=[POS])
 pos_cache = {"mkt1_YES": POS.copy()}

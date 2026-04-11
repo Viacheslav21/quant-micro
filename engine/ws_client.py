@@ -95,6 +95,12 @@ class MicroWS:
         if ws_key in self.prices:
             self.prices[ws_key]["is_position"] = False
 
+    def update_last_seen(self, ws_key: str):
+        """Mark ws_key as recently seen (prevents stale re-fires without direct mutation)."""
+        info = self.prices.get(ws_key)
+        if info:
+            info["last_update"] = time.time()
+
     def get_spread(self, ws_key: str) -> float:
         info = self.prices.get(ws_key, {})
         return info.get("best_ask", 0) - info.get("best_bid", 0)
@@ -259,10 +265,18 @@ class MicroWS:
             new_price = self._side_price(ws_key, raw)
 
             # Sanity: reject wild price jumps (>50% from current) — likely bad tick
+            # But allow if multiple consecutive events confirm the new level
             old_price = info.get("price", 0.5)
             if old_price > 0.1 and abs(new_price - old_price) > old_price * 0.5:
-                log.warning(f"[WS] Wild tick rejected: {ws_key} {old_price:.4f}→{new_price:.4f} (raw={raw:.4f})")
-                continue
+                last_rejected = info.get("_rejected_price")
+                if last_rejected is not None and abs(new_price - last_rejected) < 0.05:
+                    # Second event at same level — real move, not a glitch
+                    log.info(f"[WS] Large move confirmed: {ws_key} {old_price:.4f}→{new_price:.4f} (2nd event)")
+                else:
+                    info["_rejected_price"] = new_price
+                    log.warning(f"[WS] Wild tick rejected: {ws_key} {old_price:.4f}→{new_price:.4f} (raw={raw:.4f})")
+                    continue
+            info.pop("_rejected_price", None)
 
             info["price"] = new_price
             # Sync best_bid from authoritative price — book events are incremental
@@ -302,14 +316,15 @@ class MicroWS:
 
             invert = self._key_invert.get(ws_key, False)
 
-            current_price = info.get("price", 0)
+            # Guard: incremental book events may only contain deeper levels,
+            # not the top of book. Don't let best_bid drop below the authoritative
+            # price from the last price_change event (prevents phantom SL triggers).
+            # Real drops arrive via price_change first, then book follows.
+            auth_price = info.get("price", 0)
 
             if not invert:
                 if raw_best_bid > 0:
-                    # Guard: incremental book events may only contain lower-level bids.
-                    # Don't let best_bid drop >5% below latest price from price_change.
-                    if current_price <= 0 or raw_best_bid >= current_price * 0.95:
-                        info["best_bid"] = raw_best_bid
+                    info["best_bid"] = max(raw_best_bid, auth_price)
                 if raw_best_ask > 0:
                     info["best_ask"] = raw_best_ask
             else:
@@ -318,18 +333,17 @@ class MicroWS:
                 # NO ask = 1 - YES bid (what we'd pay buying NO)
                 if raw_best_ask > 0:
                     no_bid = round(1.0 - raw_best_ask, 4)
-                    if current_price <= 0 or no_bid >= current_price * 0.95:
-                        info["best_bid"] = no_bid
+                    info["best_bid"] = max(no_bid, auth_price)
                 if raw_best_bid > 0:
                     info["best_ask"] = round(1.0 - raw_best_bid, 4)
 
-            # Sanity check: bid/ask must be in valid range and bid < ask
+            # Sanity check: bid/ask must be in valid range
             bid = info.get("best_bid", 0)
             ask = info.get("best_ask", 0)
             if bid <= 0.001 or bid >= 1.0:
-                info["best_bid"] = info["price"]
+                info["best_bid"] = auth_price
             if ask <= 0.001 or ask >= 1.0:
-                info["best_ask"] = info["price"]
+                info["best_ask"] = auth_price
 
             info["last_update"] = time.time()
             await self._dispatch(ws_key, info)

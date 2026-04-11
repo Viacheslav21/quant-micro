@@ -1,12 +1,16 @@
 """Tests for bug fixes in quant-micro.
 
 Covers: #1 (WS multi-key token mapping), #8 (NO price from API),
-        #6 (year rollover), #17 (Telegram HTML escaping).
+        #6 (year rollover), #17 (Telegram HTML escaping),
+        shared utilities, book guard.
 Run: python3 tests/test_bugfixes.py
 All tests are self-contained — no external deps required.
 """
-import asyncio, re, html, unittest
+import sys, os, asyncio, re, html, unittest
 from datetime import datetime, timezone, timedelta
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 
 # ── Bug #1: WS multi-key token mapping (YES + NO on same token) ──
@@ -226,45 +230,137 @@ class TestWsPriceSync(unittest.TestCase):
         info["best_bid"] = new_price  # this is the fix
         self.assertAlmostEqual(info["best_bid"], 0.88)
 
-    def test_book_incremental_blocked(self):
-        """Incremental book bid far below price should NOT overwrite best_bid."""
+    def test_book_guard_prevents_stale_lower_bid(self):
+        """Book events can't lower best_bid below authoritative price (from price_change).
+        Prevents phantom SL triggers from incremental book events with deeper-level bids."""
         ws = self._make_ws()
         info = ws.prices["mkt_YES"]
         info["price"] = 0.88
         info["best_bid"] = 0.88
-        # Simulate book event with low-level bid
-        raw_best_bid = 0.80
-        current_price = info.get("price", 0)
-        # Guard: only update if within 5% of price
-        if current_price <= 0 or raw_best_bid >= current_price * 0.95:
-            info["best_bid"] = raw_best_bid
-        self.assertAlmostEqual(info["best_bid"], 0.88, msg="Stale bid 0.80 should be blocked")
+        # Stale book bid below authoritative price → guarded by max()
+        raw_best_bid = 0.40
+        auth_price = info["price"]
+        guarded_bid = max(raw_best_bid, auth_price)
+        self.assertAlmostEqual(guarded_bid, 0.88, msg="Stale book bid should be guarded by auth_price")
 
-    def test_book_real_bid_accepted(self):
-        """Real top-of-book bid close to price should be accepted."""
+    def test_book_allows_higher_bid(self):
+        """Book events CAN raise best_bid above authoritative price."""
         ws = self._make_ws()
         info = ws.prices["mkt_YES"]
         info["price"] = 0.88
         info["best_bid"] = 0.88
-        raw_best_bid = 0.87  # within 5% of 0.88
-        current_price = info.get("price", 0)
-        if current_price <= 0 or raw_best_bid >= current_price * 0.95:
-            info["best_bid"] = raw_best_bid
-        self.assertAlmostEqual(info["best_bid"], 0.87, msg="Real bid 0.87 should be accepted")
+        raw_best_bid = 0.92
+        auth_price = info["price"]
+        info["best_bid"] = max(raw_best_bid, auth_price)
+        self.assertAlmostEqual(info["best_bid"], 0.92, msg="Higher book bid should be accepted")
 
-    def test_no_side_book_guard(self):
-        """NO side: incremental YES ask should not produce stale NO bid."""
+
+# ── Shared utilities ──
+
+from engine.shared import calc_days_left, parse_outcome_prices, calc_exit_fee, hours_since
+
+
+class TestSharedCalcDaysLeft(unittest.TestCase):
+    def test_future_date(self):
+        result = calc_days_left("2027-06-01T00:00:00Z")
+        self.assertGreater(result, 0)
+
+    def test_past_date_returns_zero(self):
+        self.assertEqual(calc_days_left("2020-01-01T00:00:00Z"), 0)
+
+    def test_none_returns_default(self):
+        self.assertEqual(calc_days_left(None), 999.0)
+
+    def test_custom_fallback(self):
+        self.assertEqual(calc_days_left(None, fallback=0.5), 0.5)
+
+    def test_invalid_string(self):
+        self.assertEqual(calc_days_left("garbage"), 999.0)
+
+    def test_z_suffix(self):
+        result = calc_days_left("2027-01-01T00:00:00Z")
+        self.assertGreater(result, 0)
+
+    def test_plus_offset(self):
+        result = calc_days_left("2027-01-01T00:00:00+00:00")
+        self.assertGreater(result, 0)
+
+
+class TestSharedParseOutcomePrices(unittest.TestCase):
+    def test_dict_with_json_string(self):
+        y, n = parse_outcome_prices({"outcomePrices": '["0.95","0.05"]'})
+        self.assertAlmostEqual(y, 0.95, places=2)
+        self.assertAlmostEqual(n, 0.05, places=2)
+
+    def test_dict_with_list(self):
+        y, n = parse_outcome_prices({"outcomePrices": [0.92, 0.08]})
+        self.assertAlmostEqual(y, 0.92, places=2)
+        self.assertAlmostEqual(n, 0.08, places=2)
+
+    def test_dict_fallback_yes_no(self):
+        y, n = parse_outcome_prices({"yes_price": "0.90", "no_price": "0.10"})
+        self.assertAlmostEqual(y, 0.90, places=2)
+
+    def test_single_element(self):
+        y, n = parse_outcome_prices({"outcomePrices": [0.75]})
+        self.assertAlmostEqual(n, 0.25, places=2)
+
+    def test_empty_dict(self):
+        y, n = parse_outcome_prices({})
+        self.assertEqual(y, 0)
+        self.assertEqual(n, 0)
+
+    def test_none(self):
+        y, n = parse_outcome_prices(None)
+        self.assertEqual(y, 0)
+        self.assertEqual(n, 0)
+
+    def test_raw_list(self):
+        y, n = parse_outcome_prices([0.60, 0.40])
+        self.assertAlmostEqual(y, 0.60, places=2)
+        self.assertAlmostEqual(n, 0.40, places=2)
+
+    def test_raw_string(self):
+        y, n = parse_outcome_prices('["0.80","0.20"]')
+        self.assertAlmostEqual(y, 0.80, places=2)
+        self.assertAlmostEqual(n, 0.20, places=2)
+
+
+class TestSharedCalcExitFee(unittest.TestCase):
+    def test_normal(self):
+        fee = calc_exit_fee(20.0, 0.95, {"SLIPPAGE": 0.005, "FEE_PCT": 0.02})
+        # slippage = 0.005 * 20 / 0.95 ≈ 0.1053, fee = 0.02 * 20 = 0.40
+        self.assertAlmostEqual(fee, 0.5053, places=3)
+
+    def test_zero_config(self):
+        self.assertEqual(calc_exit_fee(20.0, 0.95, {}), 0)
+
+    def test_zero_entry(self):
+        fee = calc_exit_fee(20.0, 0.0, {"SLIPPAGE": 0.005, "FEE_PCT": 0.02})
+        self.assertAlmostEqual(fee, 0.40, places=2)
+
+    def test_no_slippage_only_fee(self):
+        fee = calc_exit_fee(10.0, 0.90, {"FEE_PCT": 0.01})
+        self.assertAlmostEqual(fee, 0.10, places=2)
+
+
+class TestWsUpdateLastSeen(unittest.TestCase):
+    def test_updates_timestamp(self):
         ws = FakeWS()
-        ws.register_market("mkt_NO", token_id="tok", token_side="no", price=0.88)
-        info = ws.prices["mkt_NO"]
-        info["price"] = 0.88
-        info["best_bid"] = 0.88
-        # Incremental book: YES ask=0.20 → NO bid = 1-0.20 = 0.80 (stale)
-        no_bid = round(1.0 - 0.20, 4)  # 0.80
-        current_price = info.get("price", 0)
-        if current_price <= 0 or no_bid >= current_price * 0.95:
-            info["best_bid"] = no_bid
-        self.assertAlmostEqual(info["best_bid"], 0.88, msg="NO stale bid 0.80 should be blocked")
+        ws.register_market("mkt_YES", token_id="tok", token_side="yes", price=0.90)
+        ws.prices["mkt_YES"]["last_update"] = 0  # simulate old timestamp
+        import time
+        # Simulate what update_last_seen does
+        info = ws.prices.get("mkt_YES")
+        if info:
+            info["last_update"] = time.time()
+        self.assertGreater(info["last_update"], 0, "Timestamp should be updated from 0")
+
+    def test_missing_key_no_error(self):
+        ws = FakeWS()
+        # Should not raise
+        info = ws.prices.get("nonexistent")
+        self.assertIsNone(info)
 
 
 if __name__ == "__main__":

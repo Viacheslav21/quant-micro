@@ -2,8 +2,8 @@
 
 import time
 import logging
-from datetime import datetime, timezone
 
+from engine.shared import calc_days_left
 from engine.scanner import dynamic_entry_price
 from engine.ws_client import MicroWS
 from utils.db import Database
@@ -181,14 +181,7 @@ async def check_watchlist_price(ws_key: str, price: float, info: dict,
         return
 
     end_date_str = wl.get("end_date")
-    if end_date_str:
-        try:
-            end_dt = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
-            days_left = (end_dt - datetime.now(timezone.utc)).total_seconds() / 86400
-        except Exception:
-            days_left = wl.get("days_left", 0)
-    else:
-        days_left = wl.get("days_left", 0)
+    days_left = calc_days_left(end_date_str, fallback=wl.get("days_left", 0))
 
     dyn_entry = dynamic_entry_price(days_left, config["ENTRY_MIN_PRICE"], config)
     if price < dyn_entry:

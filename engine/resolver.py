@@ -1,13 +1,13 @@
 """Resolution detection: expired positions, REST resolution check, event cascade."""
 
 import asyncio
-import json
 import logging
 import time as _time
 from datetime import datetime, timezone
 
 import httpx
 
+from engine.shared import calc_days_left, parse_outcome_prices
 from engine.ws_client import MicroWS
 from utils.db import Database
 from utils.telegram import TelegramBot
@@ -85,24 +85,9 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot,
         ws_key = f"{market_id}_{side}"
         hours_past = pos["_hours_past"]
 
-        # 1. Check resolution
+        # 1. Check resolution via closed/resolved flag
         if mdata and (mdata.get("closed") or mdata.get("resolved")):
-            yes_p, no_p = 0, 0
-            try:
-                op = mdata.get("outcomePrices")
-                if isinstance(op, str):
-                    prices = json.loads(op)
-                    yes_p = float(prices[0]) if prices else 0
-                    no_p = float(prices[1]) if len(prices) > 1 else 1 - yes_p
-                elif isinstance(op, list):
-                    yes_p = float(op[0]) if op else 0
-                    no_p = float(op[1]) if len(op) > 1 else 1 - yes_p
-                else:
-                    yes_p = float(mdata.get("yes_price", 0) or 0)
-                    no_p = float(mdata.get("no_price", 0) or 0)
-            except Exception:
-                yes_p = float(mdata.get("yes_price", 0) or 0)
-                no_p = float(mdata.get("no_price", 0) or 0)
+            yes_p, no_p = parse_outcome_prices(mdata)
             won = (side == "YES" and yes_p > 0.9) or (side == "NO" and no_p > 0.9)
             pnl = ((1.0 - entry_price) / entry_price) * stake if won else -stake
             result = "WIN" if won else "LOSS"
@@ -124,12 +109,8 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot,
         #    If REST price ≥99¢ our side → resolve (same threshold as monitor)
         if mdata:
             try:
-                op = mdata.get("outcomePrices")
-                if isinstance(op, str):
-                    op = json.loads(op)
-                if op:
-                    yes_p = float(op[0])
-                    no_p = float(op[1]) if len(op) > 1 else 1 - yes_p
+                yes_p, no_p = parse_outcome_prices(mdata)
+                if yes_p > 0 or no_p > 0:
                     side_p = yes_p if side == "YES" else no_p
                     if side_p >= 0.99 or side_p <= 0.01:
                         won = side_p >= 0.99
@@ -151,10 +132,8 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot,
             except Exception:
                 pass
 
-        # Not resolved — reset WS timestamp so stale check doesn't re-fire every scan
-        ws_info = ws.prices.get(ws_key)
-        if ws_info:
-            ws_info["last_update"] = _time.time()
+        # Not resolved — update WS timestamp via proper API to prevent stale re-fires
+        ws.update_last_seen(ws_key)
 
         # 3. Force-close if 72h+ past expiry (only for truly expired)
         if not pos.get("_is_expired") or hours_past < 72:
@@ -199,14 +178,7 @@ async def check_event_cascade(scanner, db: Database, ws: MicroWS, tg: TelegramBo
             if no_price < 0.93 or no_price >= 0.995:
                 continue
 
-            days_left = 0.5
-            end_str = s.get("end_date")
-            if end_str:
-                try:
-                    end = datetime.fromisoformat(str(end_str).replace("Z", "+00:00"))
-                    days_left = max(0, (end - datetime.now(timezone.utc)).total_seconds() / 86400)
-                except Exception:
-                    pass
+            days_left = calc_days_left(s.get("end_date"), fallback=0.5)
 
             candidate = {
                 "market_id": s["market_id"],
@@ -220,7 +192,7 @@ async def check_event_cascade(scanner, db: Database, ws: MicroWS, tg: TelegramBo
                 "liquidity": s["volume"],
                 "spread": s["spread"],
                 "days_left": days_left,
-                "end_date": end_str,
+                "end_date": s.get("end_date"),
                 "roi": round((1.0 - no_price) / no_price, 4) if no_price > 0 else 0,
                 "quality": 95,
                 "yes_token": s["yes_token"],

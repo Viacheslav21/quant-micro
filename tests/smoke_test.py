@@ -33,8 +33,9 @@ src_resolver = read("engine/resolver.py")
 src_scanner = read("engine/scanner.py")
 src_ws = read("engine/ws_client.py")
 src_db = read("utils/db.py")
+src_shared = read("engine/shared.py")
 # Combined source for checks that span modules
-src_all = src_main + src_entry + src_monitor + src_resolver
+src_all = src_main + src_entry + src_monitor + src_resolver + src_shared
 
 
 # ── 1. Config Defaults ──
@@ -59,10 +60,10 @@ check("MAX_DAYS_LEFT exists", find_config("MAX_DAYS_LEFT") is not None)
 # ── 2. SL / Safety Guards ──
 print("\n\033[1m2. SL & Safety\033[0m")
 
-check("SL disabled ≤1d: 'days_to_expiry > 1'", "days_to_expiry > 1" in src_monitor)
+check("SL disabled ≤1d: 'days_to_expiry > 1'", "days_to_expiry > 1" in src_monitor or "days_to_expiry <= 1" in src_monitor)
 check("Division by zero: entry_price guard", "entry_price > 0" in src_monitor)
 check("Resolution loss: bid_price <= 0.01", "bid_price <= 0.01" in src_monitor)
-check("Sanity check: 50% drop filter", "entry_price * 0.5" in src_monitor)
+check("Wild tick: 2nd event confirms large move", "_rejected_price" in src_ws)
 check("MAX_LOSS hard cap", "MAX_LOSS_PER_POS" in src_all)
 check("MAX_LOSS always enforced", "ALWAYS enforced" in src_monitor)
 
@@ -97,8 +98,8 @@ print("\n\033[1m4. Monitoring\033[0m")
 
 check("Resolution WIN: ≥99¢", "RESOLUTION_PRICE" in src_all)
 check("Resolution LOSS: ≤1¢", "resolved_loss" in src_monitor)
-check("SL with REST verify", "_verify_price_rest" in src_monitor)
-check("Volume confirm for SL", "_check_volume_confirms" in src_monitor)
+check("SL with REST verify", "_verify_price_and_volume" in src_monitor)
+check("Volume confirm for SL", "vol_24h" in src_monitor and "low_volume" in src_monitor)
 check("Expired position cleanup", "check_expired_positions" in src_all)
 check("Bid price for exit (not mid)", "best_bid" in src_monitor)
 check("Parallel REST for expired", "asyncio.gather" in src_resolver)
@@ -153,16 +154,16 @@ check("FEE_PCT config exists", find_config("FEE_PCT") is not None)
 check("SLIPPAGE in safe keys", "SLIPPAGE" in src_main and "_SAFE_CONFIG_KEYS" in src_main)
 check("FEE_PCT in safe keys", "FEE_PCT" in src_main and "_SAFE_CONFIG_KEYS" in src_main)
 check("Slippage applied at entry", "SLIPPAGE" in src_entry)
-check("Fee applied at SL exit", "FEE_PCT" in src_monitor)
-check("Fee applied at rapid_drop exit", src_monitor.count("FEE_PCT") >= 2, f"FEE_PCT appears {src_monitor.count('FEE_PCT')}x (need ≥2: SL+rapid_drop)")
-check("Fee applied at max_loss exit", src_monitor.count("FEE_PCT") >= 3, f"FEE_PCT appears {src_monitor.count('FEE_PCT')}x (need ≥3: SL+rapid+max)")
+check("Exit fee in shared", "FEE_PCT" in src_shared and "SLIPPAGE" in src_shared)
+check("Exit fee applied in monitor (SL/rapid/max)", "calc_exit_fee" in src_monitor and src_monitor.count("calc_exit_fee") >= 3,
+      f"calc_exit_fee appears {src_monitor.count('calc_exit_fee')}x (need ≥3: SL+rapid+max)")
 
 # ── 8b. WS Price Sync ──
 print("\n\033[1m8b. WS Price Sync\033[0m")
 
 check("price_change syncs best_bid", 'info["best_bid"] = new_price' in src_ws)
-check("Book guard: incremental bid blocked", "current_price * 0.95" in src_ws)
-check("REST uses raw[1] for NO", "raw[1]" in src_monitor)
+check("Book guard: best_bid >= auth_price", "max(raw_best_bid, auth_price)" in src_ws)
+check("Shared parses outcome prices", "parse_outcome_prices" in src_shared and "raw[1]" in src_shared)
 
 
 # ── 9. ROI Math ──
