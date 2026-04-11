@@ -55,6 +55,7 @@ THEME_KEYWORDS = {
                    "ducks","rockets","pioneers","monkey king","beijing ducks","nanjing",
                    "flying leopards","sturgeons","fujian","liaoning","tianjin",
                    "ningbo","zhejiang","guangdong tigers","shanghai sharks",
+                   "shenhua","haigang","western force","end in a draw",
                    # Teams (NFL)
                    "chiefs","49ers","eagles","cowboys","packers","ravens",
                    "bills","bengals","lions","dolphins","jets","steelers",
@@ -129,7 +130,7 @@ THEME_KEYWORDS = {
                    "consumer spending","retail sales","housing","mortgage","trade balance"],
 
     # Tech & science
-    "tech":       ["ai ","artificial intelligence","openai","anthropic","google","apple","nvidia",
+    "tech":       [" ai ","artificial intelligence","openai","anthropic","google","apple","nvidia",
                    "tesla","microsoft","meta","amazon","semiconductor","chip","quantum","robotics",
                    "chatgpt","gemini","claude","deepseek"],
     "space":      ["nasa","spacex","rocket launch","satellite","mars landing","moon landing",
@@ -225,7 +226,7 @@ def _parse_date_from_question(question: str):
     return None
 
 
-_VS_PATTERN = re.compile(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+vs\.?\s+[A-Z][a-z]+")
+_VS_PATTERN = re.compile(r"(?:[A-Z][a-z]+|[A-Z]{2,})(?:\s+(?:[A-Z][a-z]+|[A-Z]{2,}))*\s+vs\.?\s+(?:[A-Z][a-z]+|[A-Z]{2,})")
 _WIN_ON_DATE = re.compile(r"Will .+ win on 20\d{2}-\d{2}-\d{2}", re.IGNORECASE)
 
 # Markets where price can jump to 0 instantly (no gradual decline for SL to catch)

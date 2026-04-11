@@ -255,6 +255,51 @@ class TestWsPriceSync(unittest.TestCase):
         self.assertAlmostEqual(info["best_bid"], 0.92, msg="Higher book bid should be accepted")
 
 
+# ── Theme classification fixes ──
+
+from engine.scanner import classify_theme
+
+
+class TestThemeClassification(unittest.TestCase):
+    """Regression: theme misclassification caused blocked categories to slip through."""
+
+    def test_counter_strike_is_esports_not_war(self):
+        self.assertEqual(classify_theme("Counter-Strike: Astralis vs TheMongolz - Map 1 Winner"), "esports")
+
+    def test_shanghai_fc_is_sports_not_tech(self):
+        """'ai ' in 'shanghai' was matching tech keyword."""
+        self.assertEqual(classify_theme("Will Shanghai Shenhua FC vs. Shanghai Haigang FC end in a draw?"), "sports")
+
+    def test_western_force_is_sports(self):
+        self.assertEqual(classify_theme("Will Western Force win?"), "sports")
+
+    def test_draw_market_is_sports(self):
+        self.assertEqual(classify_theme("Will Hertha BSC vs. 1. FC Kaiserslautern end in a draw?"), "sports")
+
+    def test_cba_teams_are_sports(self):
+        self.assertEqual(classify_theme("Tianjin Pioneers vs. Ningbo Rockets"), "sports")
+        self.assertEqual(classify_theme("Beijing Ducks vs. Nanjing Monkey King"), "sports")
+
+    def test_ai_still_matches_tech(self):
+        self.assertEqual(classify_theme("Will AI models surpass human performance?"), "tech")
+
+    def test_shanghai_weather_is_climate_not_tech(self):
+        self.assertEqual(classify_theme("Will Shanghai temperature reach 30°C?"), "climate")
+
+    def test_vs_pattern_with_abbreviations(self):
+        """Improved _VS_PATTERN handles FC, BSC abbreviations."""
+        self.assertEqual(classify_theme("Hertha BSC vs FC Kaiserslautern"), "sports")
+
+    def test_inflation_is_economy(self):
+        self.assertEqual(classify_theme("Will annual inflation increase by 3.1% in March?"), "economy")
+
+    def test_lol_is_esports(self):
+        self.assertEqual(classify_theme("LoL: Top Esports vs JD Gaming - Game 2 Winner"), "esports")
+
+    def test_dota_is_esports(self):
+        self.assertEqual(classify_theme("Dota 2: PARIVISION vs Nigma Galaxy - Game 1 Winner"), "esports")
+
+
 # ── Shared utilities ──
 
 from engine.shared import calc_days_left, parse_outcome_prices, calc_exit_fee, hours_since
