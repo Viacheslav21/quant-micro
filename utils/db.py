@@ -139,12 +139,7 @@ class Database:
             # Migration: drop unused columns from micro_theme_stats
             for col in ["trades", "wins", "losses", "total_pnl", "raw_wr", "adj_wr"]:
                 await conn.execute(f"ALTER TABLE micro_theme_stats DROP COLUMN IF EXISTS {col}")
-            # Seed default blocked themes — always enforce block on restart
-            for theme in ["sports", "esports"]:
-                await conn.execute("""
-                    INSERT INTO micro_theme_stats (theme, blocked) VALUES ($1, true)
-                    ON CONFLICT (theme) DO UPDATE SET blocked = true
-                """, theme)
+            # No default theme blocking — managed entirely via dashboard
         log.info("[DB] Schema ready")
 
     async def get_config_overrides(self, service: str) -> dict:
