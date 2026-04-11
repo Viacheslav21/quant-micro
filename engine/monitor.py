@@ -4,6 +4,7 @@ import time
 import logging
 
 import httpx
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 
 from engine.shared import calc_days_left, calc_exit_fee, hours_since, parse_outcome_prices
 from engine.ws_client import MicroWS
@@ -25,18 +26,25 @@ def cleanup_stale_cooldowns():
         del _rest_cooldown[k]
 
 
+@retry(stop=stop_after_attempt(2), wait=wait_fixed(1),
+       retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError, OSError)),
+       reraise=True)
+async def _fetch_market_data(http_client: httpx.AsyncClient, market_id: str):
+    """Fetch market data from Gamma API with 1 retry on network errors."""
+    r = await http_client.get(
+        f"https://gamma-api.polymarket.com/markets/{market_id}", timeout=5,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
 async def _verify_price_and_volume(http_client: httpx.AsyncClient, market_id: str, side: str):
     """Single REST call: fetch price + 24h volume. Returns (side_price, vol_24h) or (None, None).
-    Replaces separate _verify_price_rest + _check_volume_confirms."""
+    Retries once on timeout/network error (critical for SL verification)."""
     if not http_client:
         return None, None
     try:
-        r = await http_client.get(
-            f"https://gamma-api.polymarket.com/markets/{market_id}", timeout=5,
-        )
-        if r.status_code != 200:
-            return None, None
-        m = r.json()
+        m = await _fetch_market_data(http_client, market_id)
         yes_p, no_p = parse_outcome_prices(m)
         price = no_p if side == "NO" else yes_p
         vol_24h = float(m.get("volume24hr") or 0)
