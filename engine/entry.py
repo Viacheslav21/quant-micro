@@ -73,11 +73,21 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         return "low_roi"
 
     quality = candidate.get("quality", 0)
-    if quality < config["MIN_QUALITY_SCORE"]:
+    days_left = candidate.get("days_left", 0)
+    # Dynamic quality threshold: far markets need higher quality
+    base_q = config["MIN_QUALITY_SCORE"]
+    if days_left <= 1:
+        min_q = base_q
+    elif days_left <= 3:
+        min_q = max(base_q, 55)
+    elif days_left <= 5:
+        min_q = max(base_q, 70)
+    else:
+        min_q = max(base_q, 80)
+    if quality < min_q:
         return "low_quality"
 
     # Dynamic SL: wide enough to survive normal fluctuations
-    days_left = candidate.get("days_left", 0)
     if days_left <= 0.5:
         sl_pct = 0.10
     elif days_left <= 1:

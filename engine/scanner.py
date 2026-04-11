@@ -32,8 +32,10 @@ THEME_KEYWORDS = {
                    "playoff","semifinal","quarterfinal","final four",
                    "round of 16","round of 32","sweet 16","elite eight",
                    "clay court","linz","monza","open:",
-                   # Match patterns
-                   " vs. "," vs ",
+                   "mexico city:","barletta:","madrid:","rome:","monte carlo:",
+                   "indian wells:","miami open:","barcelona open",
+                   # Match patterns (no " vs " here — _VS_PATTERN fallback catches it
+                   # after esports/other themes get a chance to match first)
                    "spread:","o/u ","over/under","moneyline",
                    "total goals","total points","total runs","total sets",
                    "points scored","score ","goals ",
@@ -51,13 +53,15 @@ THEME_KEYWORDS = {
                    "nuggets","heat","knicks","suns","clippers","mavericks",
                    "timberwolves","cavaliers","thunder","grizzlies","pelicans",
                    "ducks","rockets","pioneers","monkey king","beijing ducks","nanjing",
+                   "flying leopards","sturgeons","fujian","liaoning","tianjin",
+                   "ningbo","zhejiang","guangdong tigers","shanghai sharks",
                    # Teams (NFL)
                    "chiefs","49ers","eagles","cowboys","packers","ravens",
                    "bills","bengals","lions","dolphins","jets","steelers",
                    "patriots","broncos","chargers","rams","seahawks","commanders",
                    # Teams (NHL)
                    "bruins","maple leafs","oilers","panthers",
-                   "hurricanes","avalanche","stars","lightning","penguins",
+                   "hurricanes","avalanche","dallas stars","lightning","penguins",
                    "capitals","canadiens","red wings","islanders","blue jackets",
                    # Teams (Soccer)
                    "real madrid","barcelona","manchester city","manchester united",
@@ -89,7 +93,7 @@ THEME_KEYWORDS = {
     "israel":     ["israel","hamas","gaza","hezbollah","netanyahu","idf","west bank","golan","dimona"],
     "ukraine":    ["ukraine","zelensky","donbas","crimea","kherson","zaporizhzhia"],
     "russia":     ["russia","putin","kremlin","moscow","wagner","navalny"],
-    "china":      ["china","taiwan","beijing","xi jinping","south china sea","ccp","uyghur"],
+    "china":      ["china","taiwan","xi jinping","south china sea","ccp","uyghur","chinese government"],
     "war":        ["war ","attack","invasion","missile","nuclear","military","troops","bomb",
                    "drone","ceasefire","peace deal","airstrike","evacuate"],
     "peace":      ["peace","deal","agreement","surrender","truce","negotiations","treaty"],
@@ -124,8 +128,8 @@ THEME_KEYWORDS = {
     "tech":       ["ai ","artificial intelligence","openai","anthropic","google","apple","nvidia",
                    "tesla","microsoft","meta","amazon","semiconductor","chip","quantum","robotics",
                    "chatgpt","gemini","claude","deepseek"],
-    "space":      ["nasa","spacex","rocket","satellite","mars","moon","orbit","launch","starship",
-                   "blue origin","artemis"],
+    "space":      ["nasa","spacex","rocket launch","satellite","mars landing","moon landing",
+                   "orbit","starship","blue origin","artemis","space station","space launch"],
     "musk":       ["elon musk","musk","tweet","twitter","x.com"],
     "social":     ["followers","tiktok","instagram","youtube","subscribers","views","downloads",
                    "mrbeast","mr beast","streamer","influencer","viral"],
@@ -424,9 +428,11 @@ class MicroScanner:
                 no_price = float(raw_prices[1]) if len(raw_prices) > 1 else round(1.0 - yes_price, 4)
 
                 # Neither side in our target zone — skip early
-                # Use 0.86 floor (lowest possible: 90¢ entry - 4¢ watchlist buffer)
+                # Floor 0.86 (90¢ entry - 4¢ buffer), ceiling 0.98 (ROI too low after costs)
                 early_min = min(wl_min, 0.86)
                 if yes_price < early_min and no_price < early_min:
+                    continue
+                if yes_price > 0.98 and no_price > 0.98:
                     continue
 
                 # Get days_left: API endDate first, then parse from question

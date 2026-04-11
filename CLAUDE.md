@@ -14,7 +14,7 @@ cp .env.example .env  # edit with real credentials
 python main.py
 ```
 
-Tests: `python tests/smoke_test.py` (88 offline source code checks) + `python tests/test_logic.py` (73 unit tests with mocked DB/WS/Telegram — tests entry rejections, dynamic pricing, binary risk filter, SL, resolution, MAX_LOSS, sim costs) + `python tests/test_bugfixes.py` (18 regression tests — WS multi-key, NO price, year rollover, HTML escaping, WS price sync). No linter configured. Logging to stdout. Deployed via Railway (`Procfile: worker: python main.py`).
+Tests: `python tests/smoke_test.py` (91 offline source code checks) + `python tests/test_logic.py` (81 unit tests with mocked DB/WS/Telegram — tests entry rejections, dynamic pricing, binary risk filter, SL, resolution, MAX_LOSS, sim costs, dynamic quality thresholds) + `python tests/test_bugfixes.py` (18 regression tests — WS multi-key, NO price, year rollover, HTML escaping, WS price sync). No linter configured. Logging to stdout. Deployed via Railway (`Procfile: worker: python main.py`).
 
 ## Architecture
 
@@ -29,7 +29,7 @@ Polymarket API → Scanner (every 2 min, 1600 markets max)
     → WS Subscribe (monitor watchlist prices in real-time)
     → Entry when price hits dynamic entry zone:
         → Combined Entry Check (1 query: duplicate, theme block, SL blacklist, cooldown, negRisk group)
-        → Quality Gate (score ≥ 40)
+        → Quality Gate (dynamic: ≤1d→Q≥40, 1-3d→Q≥55, 3-5d→Q≥70, 5d+→Q≥80)
         → Spread Check (< 2¢)
         → Theme Limit (max 3 per theme)
         → NegRisk Group Limit (max 1 per negRisk event)
@@ -51,7 +51,7 @@ Polymarket API → Scanner (every 2 min, 1600 markets max)
 - **engine/entry.py** (~210 lines) — Entry logic. `try_enter()` with combined entry check (1 query: duplicate, theme block, SL blacklist, cooldown, negRisk group). Returns reason string on rejection for skip tracking. Dynamic SL (7-10% by days_left). `check_watchlist_price()` WS callback with dynamic entry price. `calc_stake()` (5% bankroll, min/max bounds).
 - **engine/monitor.py** (~270 lines) — Position monitoring via WS. Resolution detection (≥99¢ WIN, ≤1¢ LOSS). MAX_LOSS hard cap ($3, always enforced). Dynamic SL (disabled ≤1d). Rapid-drop guard (7¢, disabled ≤1d). REST price verification before SL/rapid-drop exits. Volume confirmation (skip SL if 24h vol <$5k). Sanity check (ignore >50% drops). DB write throttle (30s).
 - **engine/resolver.py** (~190 lines) — Resolution for expired/stale positions. Parallel REST fetch for positions past end_date OR disappeared from scanner (market closed). Event cascade: detects negRisk YES resolution, enters NO on siblings.
-- **engine/scanner.py** (~560 lines) — Fetches up to 1600 markets from Gamma API (16 pages, parallel). `dynamic_entry_price()`: ≤1d→90¢, ≤2d→92¢, ≤3d→93¢, >3d→base (configurable via ENTRY_PRICE_1D/2D/3D). `is_binary_risk()` filter blocks markets that can lose entire stake instantly (range bets "between $X and $Y", coin flips "Up or Down", "Green or Red"). Filters: volume >$50k, spread <2¢, ≤7 days to expiry. Both YES and NO sides checked. Quality scoring (0-100). Theme classification (~30 themes + `music` theme, sports/esports checked FIRST via comprehensive keyword lists + "vs" regex + "win on 2026-XX-XX" pattern). Date parsing from question text with year-rollover handling. Event siblings map for negRisk cascade. `neg_risk_id` passed through candidate dict for group limiting.
+- **engine/scanner.py** (~560 lines) — Fetches up to 1600 markets from Gamma API (16 pages, parallel). `dynamic_entry_price()`: ≤1d→90¢, ≤2d→92¢, ≤3d→93¢, >3d→base (configurable via ENTRY_PRICE_1D/2D/3D). `is_binary_risk()` filter blocks markets that can lose entire stake instantly (range bets "between $X and $Y", coin flips "Up or Down", "Green or Red"). Filters: volume >$50k, spread <2¢, ≤7 days to expiry. Both YES and NO sides checked. Quality scoring (0-100). Price ceiling: both sides >98¢ skipped (ROI too low after costs). Theme classification (~30 themes + `music` theme, sports/esports checked FIRST via keyword lists, then `_VS_PATTERN` regex fallback for unrecognized "Team vs Team", "win on 2026-XX-XX" pattern). Date parsing from question text with year-rollover handling. Event siblings map for negRisk cascade. `neg_risk_id` passed through candidate dict for group limiting.
 - **engine/ws_client.py** (~320 lines) — Polymarket WebSocket client. Dual-purpose: watchlist price-up detection + position SL/resolution monitoring. One token can serve multiple ws_keys (YES + NO sides). Bid-price based exit pricing. Auto-reconnect with exponential backoff, heartbeat, batch subscribe/unsubscribe.
 - **utils/db.py** (~440 lines) — PostgreSQL with 3 tables: micro_watchlist (composite PK: market_id + side, quality score, neg_risk_id), micro_positions (with end_date, neg_risk_id for group limiting), micro_theme_stats (theme + blocked flag only). Combined entry check (1 query: duplicate, theme block, SL blacklist, cooldown, negRisk group limit). Bankroll computed from positions (no separate stats table). Bayesian theme auto-block (shrinkage k=20, block if adj WR < 40% after 10+ trades). Atomic close (`WHERE status='open' RETURNING id`). Auto-migrations for schema changes.
 - **utils/telegram.py** (~50 lines) — Async Telegram notifications with HTML escaping (preserves `<a>`, `<b>`, `<i>`, `<code>` tags) and plain text fallback.
@@ -59,7 +59,8 @@ Polymarket API → Scanner (every 2 min, 1600 markets max)
 ### Key Algorithms
 
 - **Dynamic Entry Price**: Configurable per time-to-expiry: ENTRY_PRICE_1D (default 90¢), ENTRY_PRICE_2D (92¢), ENTRY_PRICE_3D (93¢), >3d uses ENTRY_MIN_PRICE (94¢). Applied in scanner (direct/watchlist split) and WS watchlist callback. Allows more aggressive entry on near-expiry markets where resolution is imminent.
-- **Quality Scoring**: 0-100 score based on price (higher=better), spread (tighter=better), days_left (closer=better), volume (higher=better). Minimum score 40 to enter (Q<40 had 0% WR in audit).
+- **Quality Scoring**: 0-100 score based on price (higher=better), spread (tighter=better), days_left (closer=better), volume (higher=better). **Dynamic quality threshold by time-to-resolution**: ≤1d→Q≥40 (base), 1-3d→Q≥55, 3-5d→Q≥70, 5d+→Q≥80. Far markets need stronger signals. Data: Q40-60 had 66.7% WR vs Q80+ at 97.3%.
+- **Scanner price ceiling**: Markets where both sides >98¢ are skipped (ROI<2%, after costs ≈ break-even).
 - **Entry Logic**: Buy YES/NO at best_ask price. Stake = 5% of bankroll, min $10, max $20. ROI at resolution must be ≥1.8%.
 - **Dynamic SL**: ≤12h left → 10%, ≤1d → 9%, ≤2d → 8%, >2d → 7%. Disabled entirely for markets ≤1 day to expiry (let resolution play out).
 - **MAX_LOSS Hard Cap**: $3 per position, always enforced even when SL is disabled. Uses REST-confirmed price.
@@ -100,7 +101,7 @@ Config loaded from environment variables at startup, then overridden at runtime 
 - **Stakes**: $10-20 per position (5% of bankroll)
 - **Binary risk filter**: Blocks markets where price jumps to 0 instantly without gradual decline: range bets ("between $X and $Y"), coin flips ("Up or Down", "Green or Red", "Higher or Lower"). SL/MAX_LOSS can't catch these.
 - **Theme blocking**: Managed via dashboard (block/unblock). Sports/esports blocked by default. Bayesian auto-block for themes with WR < 40% after 10+ trades.
-- **Quality gate**: Score ≥40 required (based on price, spread, days_left, volume)
+- **Quality gate**: Dynamic threshold by time-to-resolution (≤1d→Q≥40, 1-3d→Q≥55, 3-5d→Q≥70, 5d+→Q≥80). Score based on price, spread, days_left, volume
 - **Dynamic SL**: 7-10% depending on time to resolution. **Disabled for markets ≤1 day to expiry** (let resolution play out).
 - **MAX_LOSS hard cap**: $3 per position, always enforced regardless of SL status
 - **SL blacklist**: No re-entry after stop loss or rapid drop on same market+side

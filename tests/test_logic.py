@@ -283,6 +283,50 @@ for days, expected_sl in [(0.3, 0.10), (0.5, 0.10), (1.0, 0.09), (1.5, 0.08), (2
 
 
 # ══════════════════════════════════════
+# 4b. Dynamic Quality Threshold by days_left
+# ══════════════════════════════════════
+print("\n\033[1m4b. Dynamic Quality Threshold\033[0m")
+
+# ≤1d: base Q (40) — near resolution, low bar
+candidate_q50_1d = {**BASE_CANDIDATE, "days_left": 0.5, "quality": 45}
+result = run(try_enter(candidate_q50_1d, MockDB(), MockWS(), MockTG(), BASE_CONFIG))
+check("≤1d Q=45 → accepted (base=40)", result is True)
+
+# 1-3d: need Q≥55
+candidate_q50_2d = {**BASE_CANDIDATE, "days_left": 2.0, "quality": 50}
+result = run(try_enter(candidate_q50_2d, MockDB(), MockWS(), MockTG(), BASE_CONFIG))
+check("2d Q=50 → rejected (need 55)", result == "low_quality", f"got {result}")
+
+candidate_q55_2d = {**BASE_CANDIDATE, "days_left": 2.0, "quality": 55}
+result = run(try_enter(candidate_q55_2d, MockDB(), MockWS(), MockTG(), BASE_CONFIG))
+check("2d Q=55 → accepted", result is True)
+
+# 3-5d: need Q≥70
+candidate_q60_4d = {**BASE_CANDIDATE, "days_left": 4.0, "quality": 60}
+result = run(try_enter(candidate_q60_4d, MockDB(), MockWS(), MockTG(), BASE_CONFIG))
+check("4d Q=60 → rejected (need 70)", result == "low_quality", f"got {result}")
+
+candidate_q70_4d = {**BASE_CANDIDATE, "days_left": 4.0, "quality": 70}
+result = run(try_enter(candidate_q70_4d, MockDB(), MockWS(), MockTG(), BASE_CONFIG))
+check("4d Q=70 → accepted", result is True)
+
+# 5d+: need Q≥80
+candidate_q75_6d = {**BASE_CANDIDATE, "days_left": 6.0, "quality": 75}
+result = run(try_enter(candidate_q75_6d, MockDB(), MockWS(), MockTG(), BASE_CONFIG))
+check("6d Q=75 → rejected (need 80)", result == "low_quality", f"got {result}")
+
+candidate_q80_6d = {**BASE_CANDIDATE, "days_left": 6.0, "quality": 80}
+result = run(try_enter(candidate_q80_6d, MockDB(), MockWS(), MockTG(), BASE_CONFIG))
+check("6d Q=80 → accepted", result is True)
+
+# Config override: if MIN_QUALITY_SCORE > default tier, use config value
+high_q_config = {**BASE_CONFIG, "MIN_QUALITY_SCORE": 60}
+candidate_q55_05d = {**BASE_CANDIDATE, "days_left": 0.5, "quality": 55}
+result = run(try_enter(candidate_q55_05d, MockDB(), MockWS(), MockTG(), high_q_config))
+check("≤1d config Q=60, actual Q=55 → rejected", result == "low_quality", f"got {result}")
+
+
+# ══════════════════════════════════════
 # 5. Monitor: resolution detection
 # ══════════════════════════════════════
 print("\n\033[1m5. Resolution Detection\033[0m")

@@ -86,6 +86,10 @@ check("Binary risk filter function", "def is_binary_risk" in src_scanner)
 check("Binary risk: up or down", "up or down" in src_scanner)
 check("Binary risk: between $ and $", "between" in src_scanner)
 check("Binary risk applied in fetch", "is_binary_risk" in src_scanner)
+check("Price ceiling: skip >98¢", "0.98" in src_scanner)
+check("Dynamic quality threshold", "min_q" in src_entry and "days_left" in src_entry)
+check("No ' vs ' in sports keywords", '" vs ",' not in src_scanner.split('"esports"')[0],
+      "' vs ' should be in _VS_PATTERN fallback, not sports keywords")
 
 
 # ── 4. Position Monitoring ──
