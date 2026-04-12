@@ -1,4 +1,4 @@
-"""Position monitoring: SL, rapid drop, MAX_LOSS, resolution detection via WS."""
+"""Position monitoring: MAX_LOSS, rapid drop, resolution detection via WS."""
 
 import time
 import logging
@@ -166,65 +166,39 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             await tg.send(msg)
         return
 
-    # ── SL + Rapid Drop (only when days_to_expiry > 1) ──
+    # ── Rapid Drop (only protection besides MAX_LOSS) ──
+    # Percentage SL disabled — fights the resolution harvesting strategy.
+    # MAX_LOSS ($3 hard cap) + rapid drop (absolute ¢ threshold) are sufficient.
     days_to_expiry = calc_days_left(pos.get("end_date"))
-    if days_to_expiry <= 1:
-        return  # SL disabled near resolution
-
-    sl_pct = pos.get("sl_pct", config["SL_PCT"])
     rapid_drop_abs = config.get("RAPID_DROP_PCT", 0.07)
 
-    sl_triggered = pnl_pct <= -sl_pct
-    rd_triggered = bid_price < entry_price - rapid_drop_abs
+    if bid_price >= entry_price - rapid_drop_abs:
+        return  # no rapid drop
 
-    if not sl_triggered and not rd_triggered:
-        return
-
-    # REST cooldown — single call answers both SL and rapid drop
+    # REST cooldown
     now_ts = time.time()
     if now_ts - _rest_cooldown.get(market_id, 0) < _REST_COOLDOWN_SEC:
         return
     _rest_cooldown[market_id] = now_ts
 
-    # One REST call for price + volume
+    # REST verify
     rest_price, vol_24h = await _verify_price_and_volume(http_client, market_id, side)
     check_price = rest_price if rest_price is not None else bid_price
-    check_pnl_pct = (check_price - entry_price) / entry_price if entry_price > 0 else 0
 
-    # Volume confirmation: low volume (<$5k 24h) = noise, skip exit
-    low_volume = vol_24h is not None and vol_24h < 5000
-
-    # SL takes priority over rapid drop
-    # check_pnl_pct uses REST price when available, so REST verification
-    # is built into the condition — no separate "REST blocked" check needed.
-    if sl_triggered:
-        if check_pnl_pct <= -sl_pct:
-            if low_volume:
-                log.info(f"[SL VOL BLOCKED] {market_id[:8]} {side} vol_24h=${vol_24h:.0f} — skipping SL")
-                return
-            pnl = check_pnl_pct * stake - calc_exit_fee(stake, entry_price, config)
-            rest_tag = f" (REST: {rest_price:.4f})" if rest_price else ""
-            if await _do_close(pos, pnl, "LOSS", "stop_loss", **close_kw):
-                log.info(f"[SL] LOSS {side} '{pos['question'][:40]}' PnL: ${pnl:.2f} ({pnl_pct:+.1%}){rest_tag}")
-                msg = _tg_base(pos, bid_price, pnl, "🛑 <b>STOP LOSS</b>")
-                msg += f"\n⏱ До expiry: {days_to_expiry:.1f}d"
-                await tg.send(msg)
-            return
-        elif rest_price is not None:
-            log.info(f"[SL BLOCKED] {market_id[:8]} {side} WS pnl={pnl_pct:+.1%} but REST pnl={check_pnl_pct:+.1%}")
-
-    # Rapid drop: price dropped >N¢ from entry (uses RAPID_DROP_PCT from config)
-    if rd_triggered:
-        if check_price < entry_price - rapid_drop_abs:
-            if low_volume:
-                log.info(f"[RAPID DROP VOL BLOCKED] {market_id[:8]} {side} vol_24h=${vol_24h:.0f} — skipping")
-                return
-            pnl = check_pnl_pct * stake - calc_exit_fee(stake, entry_price, config)
-            if await _do_close(pos, pnl, "LOSS", "rapid_drop", **close_kw):
-                log.info(f"[RAPID DROP] LOSS {side} '{pos['question'][:40]}' PnL: ${pnl:.2f} ({pnl_pct:+.1%})")
-                msg = _tg_base(pos, bid_price, pnl, "⚡ <b>RAPID DROP</b>")
-                msg += f"\n⏱ До expiry: {days_to_expiry:.1f}d"
-                await tg.send(msg)
-            return
-        elif rest_price is not None:
+    if check_price >= entry_price - rapid_drop_abs:
+        if rest_price is not None:
             log.info(f"[RAPID DROP BLOCKED] {market_id[:8]} {side} WS={bid_price:.4f} but REST={rest_price:.4f}")
+        return
+
+    # Volume confirmation
+    if vol_24h is not None and vol_24h < 5000:
+        log.info(f"[RAPID DROP VOL BLOCKED] {market_id[:8]} {side} vol_24h=${vol_24h:.0f} — skipping")
+        return
+
+    check_pnl_pct = (check_price - entry_price) / entry_price if entry_price > 0 else 0
+    pnl = check_pnl_pct * stake - calc_exit_fee(stake, entry_price, config)
+    if await _do_close(pos, pnl, "LOSS", "rapid_drop", **close_kw):
+        log.info(f"[RAPID DROP] LOSS {side} '{pos['question'][:40]}' PnL: ${pnl:.2f} ({pnl_pct:+.1%})")
+        msg = _tg_base(pos, bid_price, pnl, "⚡ <b>RAPID DROP</b>")
+        msg += f"\n⏱ До expiry: {days_to_expiry:.1f}d"
+        await tg.send(msg)

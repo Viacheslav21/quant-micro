@@ -87,16 +87,6 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     if quality < min_q:
         return "low_quality"
 
-    # Dynamic SL: wide enough to survive normal fluctuations
-    if days_left <= 0.5:
-        sl_pct = 0.10
-    elif days_left <= 1:
-        sl_pct = 0.09
-    elif days_left <= 2:
-        sl_pct = 0.08
-    else:
-        sl_pct = 0.07
-
     # Execute
     pos_id = f"mic_{market_id[:8]}_{int(time.time())}"
     pos = {
@@ -107,7 +97,6 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         "side": side,
         "entry_price": round(entry_price, 4),
         "stake_amt": stake,
-        "sl_pct": sl_pct,
         "config_tag": config["CONFIG_TAG"],
         "end_date": candidate.get("end_date"),
         "neg_risk_id": neg_risk_id,
@@ -139,8 +128,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     days = candidate.get("days_left", "?")
     log.info(
         f"[ENTRY] {mode} {source.upper()} {side} '{question[:50]}' "
-        f"@ {entry_price:.2f}¢ ${stake:.2f} | ROI {roi:.1%} | SL {'OFF' if (isinstance(days, (int, float)) and days <= 1) else f'{sl_pct:.0%}'} | "
-        f"Q={quality:.0f} | {days}d left"
+        f"@ {entry_price:.2f}¢ ${stake:.2f} | ROI {roi:.1%} | Q={quality:.0f} | {days}d left"
     )
 
     stats_now = await db.get_stats(config["BANKROLL"])
@@ -150,7 +138,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         f"{'✅' if side=='YES' else '❌'} {side} <b>{question[:80]}</b>\n"
         f"📊 Вход: <b>{entry_price*100:.1f}¢</b> | Ставка: <b>${stake:.2f}</b>\n"
         f"💹 ROI: {roi:.1%} | Q={quality:.0f} | {days}d left\n"
-        f"📉 Spread: {candidate.get('spread', 0)*100:.1f}¢ | SL: {'OFF' if (isinstance(days, (int, float)) and days <= 1) else f'{sl_pct:.0%}'}\n"
+        f"📉 Spread: {candidate.get('spread', 0)*100:.1f}¢\n"
         f"💼 Банк: ${stats_now.get('bankroll', 0):.0f} | Открыто: {open_count+1}\n"
         f"🔗 <a href='https://polymarket.com/event/{candidate.get('slug') or candidate.get('market_id', '')}'>Polymarket</a>"
     )

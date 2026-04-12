@@ -316,15 +316,9 @@ class MicroWS:
 
             invert = self._key_invert.get(ws_key, False)
 
-            # Guard: incremental book events may only contain deeper levels,
-            # not the top of book. Don't let best_bid drop below the authoritative
-            # price from the last price_change event (prevents phantom SL triggers).
-            # Real drops arrive via price_change first, then book follows.
-            auth_price = info.get("price", 0)
-
             if not invert:
                 if raw_best_bid > 0:
-                    info["best_bid"] = max(raw_best_bid, auth_price)
+                    info["best_bid"] = raw_best_bid
                 if raw_best_ask > 0:
                     info["best_ask"] = raw_best_ask
             else:
@@ -332,8 +326,7 @@ class MicroWS:
                 # NO bid = 1 - YES ask (what we'd get selling NO)
                 # NO ask = 1 - YES bid (what we'd pay buying NO)
                 if raw_best_ask > 0:
-                    no_bid = round(1.0 - raw_best_ask, 4)
-                    info["best_bid"] = max(no_bid, auth_price)
+                    info["best_bid"] = round(1.0 - raw_best_ask, 4)
                 if raw_best_bid > 0:
                     info["best_ask"] = round(1.0 - raw_best_bid, 4)
 
@@ -341,9 +334,9 @@ class MicroWS:
             bid = info.get("best_bid", 0)
             ask = info.get("best_ask", 0)
             if bid <= 0.001 or bid >= 1.0:
-                info["best_bid"] = auth_price
+                info["best_bid"] = info.get("price", 0)
             if ask <= 0.001 or ask >= 1.0:
-                info["best_ask"] = auth_price
+                info["best_ask"] = info.get("price", 0)
 
             info["last_update"] = time.time()
             await self._dispatch(ws_key, info)

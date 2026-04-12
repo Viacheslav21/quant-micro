@@ -230,29 +230,25 @@ class TestWsPriceSync(unittest.TestCase):
         info["best_bid"] = new_price  # this is the fix
         self.assertAlmostEqual(info["best_bid"], 0.88)
 
-    def test_book_guard_prevents_stale_lower_bid(self):
-        """Book events can't lower best_bid below authoritative price (from price_change).
-        Prevents phantom SL triggers from incremental book events with deeper-level bids."""
+    def test_book_lowers_best_bid(self):
+        """Book events update best_bid directly — real price drops must not be blocked.
+        Critical: blocking book-driven drops caused missed SL on BTC YES position."""
         ws = self._make_ws()
         info = ws.prices["mkt_YES"]
         info["price"] = 0.88
         info["best_bid"] = 0.88
-        # Stale book bid below authoritative price → guarded by max()
         raw_best_bid = 0.40
-        auth_price = info["price"]
-        guarded_bid = max(raw_best_bid, auth_price)
-        self.assertAlmostEqual(guarded_bid, 0.88, msg="Stale book bid should be guarded by auth_price")
+        info["best_bid"] = raw_best_bid
+        self.assertAlmostEqual(info["best_bid"], 0.40, msg="Book bid should update directly")
 
-    def test_book_allows_higher_bid(self):
-        """Book events CAN raise best_bid above authoritative price."""
+    def test_book_raises_best_bid(self):
+        """Book events CAN raise best_bid above current price."""
         ws = self._make_ws()
         info = ws.prices["mkt_YES"]
         info["price"] = 0.88
         info["best_bid"] = 0.88
-        raw_best_bid = 0.92
-        auth_price = info["price"]
-        info["best_bid"] = max(raw_best_bid, auth_price)
-        self.assertAlmostEqual(info["best_bid"], 0.92, msg="Higher book bid should be accepted")
+        info["best_bid"] = 0.92
+        self.assertAlmostEqual(info["best_bid"], 0.92)
 
 
 # ── Theme classification fixes ──

@@ -53,14 +53,14 @@ check("WATCHLIST_MIN_PRICE = 0.90", find_config("WATCHLIST_MIN_PRICE") == "0.90"
 check("MIN_ROI exists", find_config("MIN_ROI") is not None)
 check("MIN_QUALITY_SCORE exists", find_config("MIN_QUALITY_SCORE") is not None)
 check("MAX_OPEN = 50", find_config("MAX_OPEN") == "50")
-check("RESOLUTION_PRICE = 0.99", find_config("RESOLUTION_PRICE") == "0.99")
+check("RESOLUTION_PRICE = 0.995", find_config("RESOLUTION_PRICE") == "0.995")
 check("MAX_DAYS_LEFT exists", find_config("MAX_DAYS_LEFT") is not None)
 
 
 # ── 2. SL / Safety Guards ──
 print("\n\033[1m2. SL & Safety\033[0m")
 
-check("SL disabled ≤1d: 'days_to_expiry > 1'", "days_to_expiry > 1" in src_monitor or "days_to_expiry <= 1" in src_monitor)
+check("SL disabled, only MAX_LOSS + rapid drop", "Percentage SL disabled" in src_monitor)
 check("Division by zero: entry_price guard", "entry_price > 0" in src_monitor)
 check("Resolution loss: bid_price <= 0.01", "bid_price <= 0.01" in src_monitor)
 check("Wild tick: 2nd event confirms large move", "_rejected_price" in src_ws)
@@ -99,7 +99,7 @@ print("\n\033[1m4. Monitoring\033[0m")
 check("Resolution WIN: ≥99¢", "RESOLUTION_PRICE" in src_all)
 check("Resolution LOSS: ≤1¢", "resolved_loss" in src_monitor)
 check("SL with REST verify", "_verify_price_and_volume" in src_monitor)
-check("Volume confirm for SL", "vol_24h" in src_monitor and "low_volume" in src_monitor)
+check("Volume confirm for rapid drop", "vol_24h" in src_monitor and "VOL BLOCKED" in src_monitor)
 check("Expired position cleanup", "check_expired_positions" in src_all)
 check("Bid price for exit (not mid)", "best_bid" in src_monitor)
 check("Parallel REST for expired", "asyncio.gather" in src_resolver)
@@ -110,10 +110,9 @@ print("\n\033[1m5. Telegram\033[0m")
 
 check("Entry: shows bankroll", "Банк:" in src_entry or "bankroll" in src_entry.lower())
 check("Entry: shows spread", "Spread:" in src_entry)
-check("Entry: shows SL status", "SL:" in src_entry)
+check("Entry: shows ROI", "ROI" in src_entry)
 check("Win: shows hold time", "hold_hours" in src_monitor or "Держали" in src_monitor)
 check("Win: shows PnL %", "pnl/stake" in src_monitor or "pnl_pct" in src_monitor)
-check("Loss: shows days to expiry", "days_to_expiry" in src_monitor)
 
 
 # ── 6. DB & Data ──
@@ -162,7 +161,7 @@ check("Exit fee applied in monitor (SL/rapid/max)", "calc_exit_fee" in src_monit
 print("\n\033[1m8b. WS Price Sync\033[0m")
 
 check("price_change syncs best_bid", 'info["best_bid"] = new_price' in src_ws)
-check("Book guard: best_bid >= auth_price", "max(raw_best_bid, auth_price)" in src_ws)
+check("Book updates best_bid directly", 'info["best_bid"] = raw_best_bid' in src_ws)
 check("Shared parses outcome prices", "parse_outcome_prices" in src_shared and "raw[1]" in src_shared)
 
 

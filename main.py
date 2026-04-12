@@ -43,7 +43,7 @@ CONFIG = {
     "MIN_ROI":            float(os.getenv("MIN_ROI", "0.02")),
     "MIN_LIQUIDITY_MULT": float(os.getenv("MIN_LIQUIDITY_MULT", "100")),
     "MAX_SPREAD":         float(os.getenv("MAX_SPREAD", "0.02")),
-    "RESOLUTION_PRICE":   float(os.getenv("RESOLUTION_PRICE", "0.99")),
+    "RESOLUTION_PRICE":   float(os.getenv("RESOLUTION_PRICE", "0.995")),
     "MAX_LOSS_PER_POS":   float(os.getenv("MAX_LOSS_PER_POS", "3.0")),
     "MAX_PER_THEME":      int(os.getenv("MAX_PER_THEME", "5")),
     "CONFIG_TAG":         os.getenv("CONFIG_TAG", "micro-v4"),
@@ -72,6 +72,7 @@ _last_scan_at = 0.0
 _scan_count_global = 0
 _peak_equity = 0.0
 _WATCHDOG_STALE_SECONDS = 900
+_last_daily_report_date: str = ""
 
 _SAFE_CONFIG_KEYS = {
     "ENTRY_MIN_PRICE", "WATCHLIST_MIN_PRICE", "MIN_ROI", "MIN_QUALITY_SCORE",
@@ -106,6 +107,64 @@ def _handle_signal(sig, frame):
 
 signal.signal(signal.SIGTERM, _handle_signal)
 signal.signal(signal.SIGINT, _handle_signal)
+
+
+async def _send_daily_report(db, tg, config):
+    """Send daily summary to Telegram. Called once per day at first scan after midnight UTC."""
+    global _last_daily_report_date
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    if now.hour < 9:
+        return  # wait until 9:00 UTC
+    today = now.strftime("%Y-%m-%d")
+    if today == _last_daily_report_date:
+        return
+    _last_daily_report_date = today
+
+    try:
+        d = await db.get_daily_report(config["BANKROLL"])
+        t = d["today"]
+        trades = int(t["trades"])
+
+        # Skip if no trades yesterday (report covers previous day's final state)
+        # But still send on days with 0 trades for awareness
+
+        wr = int(t["wins"]) / trades * 100 if trades > 0 else 0
+        at = d["alltime"]
+        at_trades = int(at["trades"])
+        at_wr = int(at["wins"]) / at_trades * 100 if at_trades > 0 else 0
+
+        # Themes
+        theme_lines = []
+        for th in d["themes"][:4]:
+            theme_lines.append(f"  {th['theme']}: {th['wins']}/{th['n']} ${th['pnl']:+.2f}")
+        themes_str = "\n".join(theme_lines) if theme_lines else "  —"
+
+        # Close reasons
+        reason_parts = []
+        for r in d["reasons"]:
+            reason_parts.append(f"{r['close_reason']}={r['n']}")
+        reasons_str = ", ".join(reason_parts) if reason_parts else "—"
+
+        # Best/worst
+        best = float(t["best"] or 0)
+        worst = float(t["worst"] or 0)
+
+        msg = (
+            f"🔬 <b>MICRO DAILY</b> | {today}\n\n"
+            f"📊 <b>Сегодня:</b> {trades} сделок | WR {wr:.0f}% | <b>${float(t['pnl']):+.2f}</b>\n"
+            f"🏷 {reasons_str}\n"
+            f"🏆 Best: ${best:+.2f} | Worst: ${worst:+.2f}\n\n"
+            f"📈 <b>Темы:</b>\n{themes_str}\n\n"
+            f"💼 <b>Портфель:</b>\n"
+            f"  Банк: ${d['bankroll']:.0f} | Equity: ${d['equity']:.0f}\n"
+            f"  Открыто: {d['open_n']} поз (${d['open_staked']:.0f}) uPnL: ${d['open_upnl']:+.2f}\n\n"
+            f"📉 <b>All-time:</b> {at_trades} сделок | WR {at_wr:.0f}% | ${float(at['pnl']):+.2f}"
+        )
+        await tg.send(msg)
+        log.info(f"[DAILY] Report sent: {trades} trades, ${float(t['pnl']):+.2f}")
+    except Exception as e:
+        log.error(f"[DAILY] Report failed: {e}")
 
 
 # ── Main ──
@@ -337,8 +396,11 @@ async def main():
             f"W/L: {stats.get('wins', 0)}/{stats.get('losses', 0)}{skip_str}"
         )
 
-        # 7. Cleanup stale WS (every 30 scans)
-        if scan_count % 30 == 0:
+        # 7. Daily report (once per day, first scan after midnight UTC)
+        await _send_daily_report(db, tg, CONFIG)
+
+        # 8. Cleanup stale WS (every 30 scans)
+        if scan_count > 0 and scan_count % 30 == 0:
             await db.cleanup_watchlist()
             wl_data = await db.get_watchlist()
             wl_ids = {w["market_id"] for w in wl_data}

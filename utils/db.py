@@ -442,6 +442,61 @@ class Database:
             """)
             return [dict(r) for r in rows]
 
+    async def get_daily_report(self, starting_bankroll: float = 500.0) -> dict:
+        """Gather all data for daily telegram report in a single DB roundtrip."""
+        async with self.pool.acquire() as conn:
+            # Today's closed
+            today = await conn.fetchrow("""
+                SELECT COUNT(*) as trades,
+                    SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN result='LOSS' THEN 1 ELSE 0 END) as losses,
+                    COALESCE(SUM(pnl), 0) as pnl,
+                    MAX(pnl) as best,
+                    MIN(pnl) as worst
+                FROM micro_positions WHERE status='closed' AND closed_at >= CURRENT_DATE
+            """)
+            # Today's by close reason
+            reasons = await conn.fetch("""
+                SELECT close_reason, COUNT(*) as n, ROUND(SUM(pnl)::numeric, 2) as pnl
+                FROM micro_positions WHERE status='closed' AND closed_at >= CURRENT_DATE
+                GROUP BY close_reason ORDER BY COUNT(*) DESC
+            """)
+            # Today's top themes
+            themes = await conn.fetch("""
+                SELECT theme, COUNT(*) as n,
+                    SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) as wins,
+                    ROUND(SUM(pnl)::numeric, 2) as pnl
+                FROM micro_positions WHERE status='closed' AND closed_at >= CURRENT_DATE
+                GROUP BY theme ORDER BY SUM(pnl) DESC LIMIT 5
+            """)
+            # All-time
+            alltime = await conn.fetchrow("""
+                SELECT COUNT(*) as trades,
+                    SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) as wins,
+                    COALESCE(SUM(pnl), 0) as pnl
+                FROM micro_positions WHERE status='closed'
+            """)
+            # Open positions
+            open_row = await conn.fetchrow("""
+                SELECT COUNT(*) as n,
+                    COALESCE(SUM(stake_amt), 0) as staked,
+                    COALESCE(SUM(unrealized_pnl), 0) as upnl
+                FROM micro_positions WHERE status='open'
+            """)
+        total_pnl = float(alltime["pnl"])
+        open_staked = float(open_row["staked"])
+        return {
+            "today": dict(today),
+            "reasons": [dict(r) for r in reasons],
+            "themes": [dict(r) for r in themes],
+            "alltime": dict(alltime),
+            "open_n": int(open_row["n"]),
+            "open_staked": round(open_staked, 2),
+            "open_upnl": round(float(open_row["upnl"]), 2),
+            "bankroll": round(starting_bankroll + total_pnl - open_staked, 2),
+            "equity": round(starting_bankroll + total_pnl - open_staked + float(open_row["upnl"]), 2),
+        }
+
     async def close(self):
         if self.pool:
             await self.pool.close()
