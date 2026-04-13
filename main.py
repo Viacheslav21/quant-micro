@@ -402,7 +402,6 @@ async def main():
         for reason, themes in _skip_themes.items():
             theme_str = ", ".join(f"{t}={n}" for t, n in sorted(themes.items(), key=lambda x: -x[1]))
             log.info(f"[SCAN #{scan_count}] Skip/{reason}: {theme_str}")
-        )
 
         # 7. Daily report (once per day, first scan after midnight UTC)
         await _send_daily_report(db, tg, CONFIG)
