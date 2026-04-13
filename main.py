@@ -350,6 +350,7 @@ async def main():
         # 3. Direct entries
         entered = 0
         _skip = {}
+        _skip_themes = {}  # {reason: {theme: count}}
         for c in direct:
             if _shutdown:
                 break
@@ -358,6 +359,8 @@ async def main():
                 entered += 1
             elif isinstance(result, str):
                 _skip[result] = _skip.get(result, 0) + 1
+                theme = c.get("theme", "other")
+                _skip_themes.setdefault(result, {})[theme] = _skip_themes.get(result, {}).get(theme, 0) + 1
 
         # 4. Event cascade
         cascade_entered = await check_event_cascade(scanner, db, ws, tg, CONFIG, _pos_cache)
@@ -394,6 +397,11 @@ async def main():
             f"Bankroll: ${bankroll:.2f} | Equity: ${equity:.2f} | "
             f"PnL: ${stats.get('total_pnl', 0):.2f} | "
             f"W/L: {stats.get('wins', 0)}/{stats.get('losses', 0)}{skip_str}"
+        )
+        # Breakdown by theme for skipped (helps diagnose blocking)
+        for reason, themes in _skip_themes.items():
+            theme_str = ", ".join(f"{t}={n}" for t, n in sorted(themes.items(), key=lambda x: -x[1]))
+            log.info(f"[SCAN #{scan_count}] Skip/{reason}: {theme_str}")
         )
 
         # 7. Daily report (once per day, first scan after midnight UTC)
