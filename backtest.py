@@ -71,7 +71,7 @@ async def fetch_trades():
     conn = await asyncpg.connect(DATABASE_URL)
     rows = await conn.fetch("""
         SELECT id, market_id, question, theme, side, entry_price, current_price,
-               stake_amt, pnl, sl_pct, status, result, close_reason, end_date,
+               stake_amt, pnl, status, result, close_reason, end_date,
                opened_at, closed_at
         FROM micro_positions
         ORDER BY opened_at ASC

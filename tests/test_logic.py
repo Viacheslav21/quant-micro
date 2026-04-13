@@ -190,7 +190,7 @@ BASE_CONFIG = {
     "BANKROLL": 1000, "MAX_OPEN": 50, "MAX_PER_THEME": 5,
     "MAX_STAKE": 20, "MIN_STAKE": 5, "MIN_ROI": 0.02,
     "MIN_QUALITY_SCORE": 40, "SIMULATION": True, "CONFIG_TAG": "test",
-    "SL_PCT": 0.07, "MAX_LOSS_PER_POS": 3.0, "MAX_PER_NEG_RISK": 3,
+    "MAX_LOSS_PER_POS": 3.0, "MAX_PER_NEG_RISK": 3,
     "RESOLUTION_PRICE": 0.99, "MAX_SPREAD": 0.02,
 }
 
@@ -318,7 +318,7 @@ from engine.monitor import check_position_price
 
 POS = {
     "id": "pos1", "market_id": "mkt1", "side": "YES", "question": "Test?",
-    "entry_price": 0.95, "stake_amt": 20, "sl_pct": 0.07, "theme": "other",
+    "entry_price": 0.95, "stake_amt": 20, "theme": "other",
     "end_date": "2026-04-15T00:00:00Z",
 }
 
@@ -511,7 +511,7 @@ far_end = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
 near_end = (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat()
 
 # -- No SL: moderate drop without rapid drop threshold → no close --
-POS_MOD = {**POS, "end_date": far_end, "sl_pct": 0.07}
+POS_MOD = {**POS, "end_date": far_end}
 db = MockDB(open_positions=[POS_MOD])
 pos_cache = {"mkt1_YES": POS_MOD.copy()}
 _rest_cooldown.clear()

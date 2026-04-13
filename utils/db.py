@@ -65,8 +65,6 @@ class Database:
                     stake_amt    REAL NOT NULL,
                     unrealized_pnl REAL DEFAULT 0,
                     pnl          REAL DEFAULT 0,
-                    tp_pct       REAL DEFAULT 0.05,
-                    sl_pct       REAL DEFAULT 0.05,
                     status       TEXT DEFAULT 'open',
                     result       TEXT,
                     close_reason TEXT,
@@ -139,6 +137,11 @@ class Database:
             # Migration: drop unused columns from micro_theme_stats
             for col in ["trades", "wins", "losses", "total_pnl", "raw_wr", "adj_wr"]:
                 await conn.execute(f"ALTER TABLE micro_theme_stats DROP COLUMN IF EXISTS {col}")
+            # Migration: drop dead risk columns from micro_positions.
+            # micro never uses % SL or % TP — it relies on MAX_LOSS + RAPID_DROP
+            # + resolution detection. These columns were legacy from earlier design.
+            for col in ["sl_pct", "tp_pct"]:
+                await conn.execute(f"ALTER TABLE micro_positions DROP COLUMN IF EXISTS {col}")
             # No default theme blocking — managed entirely via dashboard
         log.info("[DB] Schema ready")
 
@@ -246,20 +249,17 @@ class Database:
     # ── Positions ──
 
     async def save_position_and_deduct(self, pos: dict, stake: float):
-        """Save position. Bankroll computed from positions, no separate stats update needed.
-        Note: sl_pct column exists but is unused — micro uses MAX_LOSS + RAPID_DROP,
-        not % SL. Column DEFAULT 0.05 populates for legacy/query compatibility."""
+        """Save position. Bankroll computed from positions, no separate stats update needed."""
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO micro_positions
                     (id, market_id, question, theme, side, entry_price,
-                     current_price, stake_amt, tp_pct, config_tag, end_date, neg_risk_id)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                     current_price, stake_amt, config_tag, end_date, neg_risk_id)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
             """,
                 pos["id"], pos["market_id"], pos["question"],
                 pos.get("theme", "other"), pos["side"], pos["entry_price"],
                 pos["entry_price"], pos["stake_amt"],
-                pos.get("tp_pct", 0.05),
                 pos.get("config_tag", "micro-v3"),
                 pos.get("end_date"),
                 pos.get("neg_risk_id"),
