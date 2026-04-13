@@ -36,7 +36,6 @@ CONFIG = {
     "MAX_STAKE":          float(os.getenv("MAX_STAKE", "20.0")),
     "MIN_STAKE":          float(os.getenv("MIN_STAKE", "5.0")),
     "MAX_OPEN":           int(os.getenv("MAX_OPEN", "50")),
-    "SL_PCT":             float(os.getenv("SL_PCT", "0.05")),
     "ENTRY_MIN_PRICE":    float(os.getenv("ENTRY_MIN_PRICE", "0.94")),
     "WATCHLIST_MIN_PRICE": float(os.getenv("WATCHLIST_MIN_PRICE", "0.90")),
     "MAX_DAYS_LEFT":      float(os.getenv("MAX_DAYS_LEFT", "7")),
@@ -82,7 +81,7 @@ _last_daily_report_date: str = ""
 _SAFE_CONFIG_KEYS = {
     "ENTRY_MIN_PRICE", "WATCHLIST_MIN_PRICE", "MIN_ROI", "MIN_QUALITY_SCORE",
     "ENTRY_PRICE_1D", "ENTRY_PRICE_2D", "ENTRY_PRICE_3D",
-    "SL_PCT", "RAPID_DROP_PCT", "MAX_LOSS_PER_POS",
+    "RAPID_DROP_PCT", "MAX_LOSS_PER_POS",
     "MAX_STAKE", "MIN_STAKE", "MAX_OPEN", "MAX_PER_THEME",
     "MAX_DAYS_LEFT", "MIN_VOLUME", "SCAN_INTERVAL", "CONFIG_TAG", "MAX_PER_NEG_RISK",
     "BANKROLL", "SLIPPAGE", "FEE_PCT",

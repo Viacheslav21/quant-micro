@@ -89,9 +89,9 @@ Polymarket API → Scanner (every 2 min, 1600 markets max)
 
 ### Configuration
 
-Config loaded from environment variables at startup, then overridden at runtime by `config_live` DB table (seeded by engine's `_seed_config_live`). `_reload_config()` merges DB overrides into the `CONFIG` dict (safe keys only, never credentials). Triggered instantly via `LISTEN config_reload` channel (auto-reconnects on connection loss). 22 micro parameters exposed for live editing in the dashboard:
+Config loaded from environment variables at startup, then overridden at runtime by `config_live` DB table (seeded by engine's `_seed_config_live`). `_reload_config()` merges DB overrides into the `CONFIG` dict (safe keys only, never credentials). Triggered instantly via `LISTEN config_reload` channel (auto-reconnects on connection loss). 21 micro parameters exposed for live editing in the dashboard:
 - **Signals**: `ENTRY_MIN_PRICE`, `WATCHLIST_MIN_PRICE`, `MIN_ROI`, `MIN_QUALITY_SCORE`, `ENTRY_PRICE_1D`, `ENTRY_PRICE_2D`, `ENTRY_PRICE_3D`
-- **Risk**: `SL_PCT` (disabled), `RAPID_DROP_PCT`, `MAX_LOSS_PER_POS`
+- **Risk**: `RAPID_DROP_PCT`, `MAX_LOSS_PER_POS`
 - **Sizing**: `MAX_STAKE`, `MIN_STAKE`
 - **Capacity**: `MAX_OPEN`, `MAX_PER_THEME`, `MAX_PER_NEG_RISK`
 - **Filters**: `MAX_DAYS_LEFT`, `MIN_VOLUME`

@@ -246,18 +246,20 @@ class Database:
     # ── Positions ──
 
     async def save_position_and_deduct(self, pos: dict, stake: float):
-        """Save position. Bankroll computed from positions, no separate stats update needed."""
+        """Save position. Bankroll computed from positions, no separate stats update needed.
+        Note: sl_pct column exists but is unused — micro uses MAX_LOSS + RAPID_DROP,
+        not % SL. Column DEFAULT 0.05 populates for legacy/query compatibility."""
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO micro_positions
                     (id, market_id, question, theme, side, entry_price,
-                     current_price, stake_amt, tp_pct, sl_pct, config_tag, end_date, neg_risk_id)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                     current_price, stake_amt, tp_pct, config_tag, end_date, neg_risk_id)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
             """,
                 pos["id"], pos["market_id"], pos["question"],
                 pos.get("theme", "other"), pos["side"], pos["entry_price"],
                 pos["entry_price"], pos["stake_amt"],
-                pos.get("tp_pct", 0.05), pos.get("sl_pct", 0.05),
+                pos.get("tp_pct", 0.05),
                 pos.get("config_tag", "micro-v3"),
                 pos.get("end_date"),
                 pos.get("neg_risk_id"),
