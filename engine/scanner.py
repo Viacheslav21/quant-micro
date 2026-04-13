@@ -367,12 +367,12 @@ class MicroScanner:
         wl_min = self.config["WATCHLIST_MIN_PRICE"]
         max_days = self.config["MAX_DAYS_LEFT"]
         max_stake = self.config["MAX_STAKE"]
-        liq_mult = self.config.get("MIN_LIQUIDITY_MULT", 500)
+        liq_mult = self.config.get("MIN_LIQUIDITY_MULT", 100)
         min_liquidity = max_stake * liq_mult
         max_spread = self.config["MAX_SPREAD"]
-        min_roi = self.config.get("MIN_ROI", 0.03)
-        min_volume = self.config.get("MIN_VOLUME", 20000)
-        min_quality = self.config.get("MIN_QUALITY_SCORE", 25)
+        min_roi = self.config.get("MIN_ROI", 0.02)
+        min_volume = self.config.get("MIN_VOLUME", 50000)
+        min_quality = self.config.get("MIN_QUALITY_SCORE", 40)
 
         direct = []
         watchlist = []

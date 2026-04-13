@@ -46,6 +46,7 @@ CONFIG = {
     "RESOLUTION_PRICE":   float(os.getenv("RESOLUTION_PRICE", "0.995")),
     "MAX_LOSS_PER_POS":   float(os.getenv("MAX_LOSS_PER_POS", "3.0")),
     "MAX_PER_THEME":      int(os.getenv("MAX_PER_THEME", "5")),
+    "MAX_PER_NEG_RISK":   int(os.getenv("MAX_PER_NEG_RISK", "3")),
     "CONFIG_TAG":         os.getenv("CONFIG_TAG", "micro-v4"),
     "SCAN_PAGES":         int(os.getenv("SCAN_PAGES", "16")),
     "MIN_VOLUME":         float(os.getenv("MIN_VOLUME", "50000")),
