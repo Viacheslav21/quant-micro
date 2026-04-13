@@ -56,9 +56,10 @@ async def _verify_price_and_volume(http_client: httpx.AsyncClient, market_id: st
 
 async def _do_close(pos, pnl, result, reason, ws_key,
                     db: Database, ws: MicroWS,
-                    pos_cache: dict, pos_last_db_write: dict):
+                    pos_cache: dict, pos_last_db_write: dict,
+                    exit_price: float = None):
     """Atomic close + WS cleanup + theme recalibration. Returns True if closed."""
-    closed = await db.close_position(pos["id"], round(pnl, 4), result, reason)
+    closed = await db.close_position(pos["id"], round(pnl, 4), result, reason, exit_price=exit_price)
     if not closed:
         return False
     ws.unmark_position(ws_key)
@@ -126,7 +127,8 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         pos_last_db_write[pos["id"]] = now_ts
 
     close_kw = dict(ws_key=ws_key, db=db, ws=ws,
-                    pos_cache=pos_cache, pos_last_db_write=pos_last_db_write)
+                    pos_cache=pos_cache, pos_last_db_write=pos_last_db_write,
+                    exit_price=bid_price)
 
     # ── Resolution: ≤1¢ (LOSS) ──
     if bid_price <= 0.01:

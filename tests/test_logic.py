@@ -51,8 +51,8 @@ class MockDB:
     async def upsert_watchlist(self, candidate):
         self.upserted.append(candidate)
 
-    async def close_position(self, pos_id, pnl, result, reason):
-        self.closed.append({"id": pos_id, "pnl": pnl, "result": result, "reason": reason})
+    async def close_position(self, pos_id, pnl, result, reason, exit_price=None):
+        self.closed.append({"id": pos_id, "pnl": pnl, "result": result, "reason": reason, "exit_price": exit_price})
         return True
 
     async def recalibrate_theme(self, theme):

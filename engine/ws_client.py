@@ -264,20 +264,6 @@ class MicroWS:
 
             new_price = self._side_price(ws_key, raw)
 
-            # Sanity: reject wild price jumps (>50% from current) — likely bad tick
-            # But allow if multiple consecutive events confirm the new level
-            old_price = info.get("price", 0.5)
-            if old_price > 0.1 and abs(new_price - old_price) > old_price * 0.5:
-                last_rejected = info.get("_rejected_price")
-                if last_rejected is not None and abs(new_price - last_rejected) < 0.05:
-                    # Second event at same level — real move, not a glitch
-                    log.info(f"[WS] Large move confirmed: {ws_key} {old_price:.4f}→{new_price:.4f} (2nd event)")
-                else:
-                    info["_rejected_price"] = new_price
-                    log.warning(f"[WS] Wild tick rejected: {ws_key} {old_price:.4f}→{new_price:.4f} (raw={raw:.4f})")
-                    continue
-            info.pop("_rejected_price", None)
-
             info["price"] = new_price
             # Sync best_bid from authoritative price — book events are incremental
             # and can set stale lower bids from non-top levels

@@ -89,9 +89,11 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot,
         if mdata and (mdata.get("closed") or mdata.get("resolved")):
             yes_p, no_p = parse_outcome_prices(mdata)
             won = (side == "YES" and yes_p > 0.9) or (side == "NO" and no_p > 0.9)
+            side_p = yes_p if side == "YES" else no_p
             pnl = ((1.0 - entry_price) / entry_price) * stake if won else -stake
             result = "WIN" if won else "LOSS"
-            closed = await db.close_position(pos["id"], round(pnl, 4), result, "resolved")
+            closed = await db.close_position(pos["id"], round(pnl, 4), result, "resolved",
+                                              exit_price=round(side_p, 4))
             if closed:
                 ws.unmark_position(ws_key)
                 _invalidate(ws_key)
@@ -116,7 +118,8 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot,
                         won = side_p >= 0.99
                         pnl = ((1.0 - entry_price) / entry_price) * stake if won else -stake
                         result = "WIN" if won else "LOSS"
-                        closed = await db.close_position(pos["id"], round(pnl, 4), result, "resolved")
+                        closed = await db.close_position(pos["id"], round(pnl, 4), result, "resolved",
+                                                          exit_price=round(side_p, 4))
                         if closed:
                             ws.unmark_position(ws_key)
                             _invalidate(ws_key)
@@ -142,7 +145,8 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot,
         current_price = pos.get("current_price", entry_price)
         pnl = ((current_price - entry_price) / entry_price) * stake
         result = "WIN" if pnl >= 0 else "LOSS"
-        closed = await db.close_position(pos["id"], round(pnl, 4), result, "expired")
+        closed = await db.close_position(pos["id"], round(pnl, 4), result, "expired",
+                                         exit_price=round(current_price, 4))
         if closed:
             ws.unmark_position(ws_key)
             _invalidate(ws_key)

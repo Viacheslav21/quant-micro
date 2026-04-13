@@ -63,7 +63,7 @@ print("\n\033[1m2. SL & Safety\033[0m")
 check("SL disabled, only MAX_LOSS + rapid drop", "Percentage SL disabled" in src_monitor)
 check("Division by zero: entry_price guard", "entry_price > 0" in src_monitor)
 check("Resolution loss: bid_price <= 0.01", "bid_price <= 0.01" in src_monitor)
-check("Wild tick: 2nd event confirms large move", "_rejected_price" in src_ws)
+check("No sanity filter blocking real drops", "_rejected_price" not in src_ws)
 check("MAX_LOSS hard cap", "MAX_LOSS_PER_POS" in src_all)
 check("MAX_LOSS always enforced", "ALWAYS enforced" in src_monitor)
 

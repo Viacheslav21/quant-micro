@@ -279,16 +279,26 @@ class Database:
             )
             return [dict(r) for r in rows]
 
-    async def close_position(self, pos_id: str, pnl: float, result: str, reason: str) -> bool:
-        """Atomic close with race protection."""
+    async def close_position(self, pos_id: str, pnl: float, result: str, reason: str,
+                             exit_price: float = None) -> bool:
+        """Atomic close with race protection. Updates current_price to actual exit price."""
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("""
-                UPDATE micro_positions
-                SET status = 'closed', pnl = $2, result = $3, close_reason = $4,
-                    closed_at = NOW()
-                WHERE id = $1 AND status = 'open'
-                RETURNING id
-            """, pos_id, pnl, result, reason)
+            if exit_price is not None:
+                row = await conn.fetchrow("""
+                    UPDATE micro_positions
+                    SET status = 'closed', pnl = $2, result = $3, close_reason = $4,
+                        current_price = $5, closed_at = NOW()
+                    WHERE id = $1 AND status = 'open'
+                    RETURNING id
+                """, pos_id, pnl, result, reason, exit_price)
+            else:
+                row = await conn.fetchrow("""
+                    UPDATE micro_positions
+                    SET status = 'closed', pnl = $2, result = $3, close_reason = $4,
+                        closed_at = NOW()
+                    WHERE id = $1 AND status = 'open'
+                    RETURNING id
+                """, pos_id, pnl, result, reason)
             return row is not None
 
     async def update_position_price(self, pos_id: str, price: float, unrealized_pnl: float):
