@@ -14,7 +14,7 @@ cp .env.example .env  # edit with real credentials
 python main.py
 ```
 
-Tests: `python tests/smoke_test.py` (89 offline source code checks) + `python tests/test_logic.py` (94 unit tests with mocked DB/WS/Telegram — tests entry rejections, dynamic pricing, binary risk filter, rapid drop, resolution, MAX_LOSS, sim costs, dynamic quality thresholds, shared utilities) + `python tests/test_bugfixes.py` (49 regression tests — WS multi-key, NO price, year rollover, HTML escaping, WS book events, shared utilities, theme classification). No linter configured. Logging to stdout. Deployed via Railway (`Procfile: worker: python main.py`).
+Tests: `python tests/smoke_test.py` (89 offline source code checks) + `python tests/test_logic.py` (99 unit tests with mocked DB/WS/Telegram — tests entry rejections, dynamic pricing, binary risk filter, rapid drop, resolution, MAX_LOSS, sim costs, quality scoring sweet spot, shared utilities) + `python tests/test_bugfixes.py` (49 regression tests — WS multi-key, NO price, year rollover, HTML escaping, WS book events, shared utilities, theme classification). No linter configured. Logging to stdout. Deployed via Railway (`Procfile: worker: python main.py`).
 
 ## Architecture
 
@@ -60,7 +60,7 @@ Polymarket API → Scanner (every 2 min, 1600 markets max)
 ### Key Algorithms
 
 - **Dynamic Entry Price**: Configurable per time-to-expiry: ENTRY_PRICE_1D (default 90¢), ENTRY_PRICE_2D (92¢), ENTRY_PRICE_3D (93¢), >3d uses ENTRY_MIN_PRICE (94¢). Applied in scanner (direct/watchlist split) and WS watchlist callback.
-- **Quality Scoring**: 0-100 score based on price (higher=better), spread (tighter=better), days_left (closer=better), volume (higher=better). **Dynamic quality threshold by time-to-resolution**: ≤1d→Q≥40 (base), 1-3d→Q≥55, 3-5d→Q≥70, 5d+→Q≥80.
+- **Quality Scoring**: 0-100 score with **sweet spot 93-96¢** (not linear high=better). Price (0-40): peak 93-96¢, penalizes ≥98¢ (thin ROI after fees) and <90¢ (uncertain). Spread (0-15) tighter=better. Days (0-30) closer=better (≤0.5d gets max). Volume (0-15). **Dynamic quality threshold by time-to-resolution**: ≤1d→Q≥40 (base), 1-3d→Q≥55, 3-5d→Q≥70, 5d+→Q≥80. Audit data: Q60-80 bucket had best avg PnL (+$1.14/trade), Q80+ underperformed (-$0.15/trade) under old linear formula because high-price markets (98-99¢) scored too high despite minimal ROI.
 - **Scanner price ceiling**: Markets where both sides >98¢ are skipped (ROI<2%, after costs ≈ break-even).
 - **Entry Logic**: Buy YES/NO at best_ask price. Stake = 5% of bankroll, min $10, max $20. ROI at resolution must be ≥1.8%.
 - **MAX_LOSS Hard Cap**: Default $3 per position, always enforced. REST-verified with tenacity retry (1 retry, 1s wait). Records real PnL at exit price (not capped).

@@ -395,6 +395,26 @@ check(f"Q(97¢, 0.5d, 1M) = {q3:.0f} > 60", q3 > 60)
 q4 = quality_score(0.91, 0.02, 7.0, 20000, 10000)
 check(f"Q(91¢, 7d, 20k) = {q4:.0f} low", q4 < 30)
 
+# Sweet spot 93-96¢ should score highest
+q_sweet = quality_score(0.94, 0.005, 0.5, 1000000, 500000)
+q_high = quality_score(0.99, 0.005, 0.5, 1000000, 500000)
+q_low = quality_score(0.90, 0.005, 0.5, 1000000, 500000)
+check(f"Sweet spot 94¢ ({q_sweet:.0f}) > 99¢ ({q_high:.0f})", q_sweet > q_high)
+check(f"Sweet spot 94¢ ({q_sweet:.0f}) > 90¢ ({q_low:.0f})", q_sweet > q_low)
+
+# High price (98¢+) should be penalized — thin ROI after fees
+q_98 = quality_score(0.98, 0.005, 0.5, 1000000, 500000)
+q_95 = quality_score(0.95, 0.005, 0.5, 1000000, 500000)
+check(f"98¢ ({q_98:.0f}) penalized vs 95¢ ({q_95:.0f})", q_98 < q_95)
+
+# 99¢ should score particularly low (no ROI after fees)
+check(f"99¢ scores low ({q_high:.0f} < 60)", q_high < 60)
+
+# Near expiry (≤0.5d) gets max bonus
+q_near = quality_score(0.94, 0.01, 0.3, 500000, 100000)
+q_far = quality_score(0.94, 0.01, 5.0, 500000, 100000)
+check(f"≤0.5d ({q_near:.0f}) > 5d ({q_far:.0f})", q_near > q_far)
+
 
 # ══════════════════════════════════════
 # 8. Realistic Sim Costs (slippage + fees)

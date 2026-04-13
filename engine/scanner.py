@@ -276,36 +276,54 @@ def classify_theme(question: str) -> str:
 
 def quality_score(price: float, spread: float, days_left: float,
                   volume: float, liquidity: float) -> float:
-    """Score 0-100. Higher = better candidate for resolution harvesting."""
+    """Score 0-100 for resolution harvesting.
+
+    Sweet spot: price 93-96¢, days ≤1, tight spread, high volume.
+    Penalizes: prices ≥98¢ (ROI too thin after fees), prices <90¢ (uncertain),
+    days >3d (empirically weaker). Data from audit: Q60-80 bucket has best
+    avg PnL, Q80+ underperforms due to catastrophic losses on high-price markets.
+    """
     score = 0.0
-    # Price confidence: 90¢=0, 93¢=30, 95¢=50, 97¢=70
-    score += max(0, (price - 0.90) * 1000)
-    # Tight spread bonus (0-20)
-    score += max(0, 20 - spread * 1000)
-    # Close to resolution (0-20)
-    if days_left <= 0.5:
+
+    # Price (0-40): peak 93-96¢ sweet spot
+    if price >= 0.98:
+        score += 0   # ROI <2%, barely profitable after fees
+    elif price >= 0.97:
+        score += 10
+    elif price >= 0.96:
         score += 20
-    elif days_left <= 1:
+    elif price >= 0.93:
+        score += 40  # SWEET SPOT (best ROI × probability)
+    elif price >= 0.91:
+        score += 25
+    elif price >= 0.90:
         score += 15
+    # <90¢: 0
+
+    # Spread (0-15) — tighter = better
+    score += max(0, 15 - spread * 1500)
+
+    # Days to resolution (0-30) — audit: ≤1d is best bucket
+    if days_left <= 0.5:
+        score += 30
+    elif days_left <= 1:
+        score += 25
     elif days_left <= 2:
-        score += 12
+        score += 10
     elif days_left <= 3:
-        score += 10
-    elif days_left <= 5:
-        score += 7
-    elif days_left <= 7:
         score += 5
-    elif days_left <= 10:
-        score += 3
-    # Volume/liquidity bonus (0-10)
-    if volume > 1_000_000:
-        score += 10
-    elif volume > 500_000:
-        score += 8
+    # >3d: 0
+
+    # Volume (0-15)
+    if volume > 500_000:
+        score += 15
     elif volume > 100_000:
-        score += 5
+        score += 10
+    elif volume > 50_000:
+        score += 6
     elif volume > 20_000:
         score += 3
+
     return round(score, 1)
 
 
