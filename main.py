@@ -173,16 +173,7 @@ async def _send_daily_report(db, tg, config):
 async def main():
     global _shutdown, _last_scan_at, _scan_count_global, _peak_equity
 
-    log.info("=" * 60)
-    log.info("[MAIN] quant-micro v3 (resolution harvester)")
-    log.info(f"[MAIN] Simulation: {CONFIG['SIMULATION']}")
-    log.info(f"[MAIN] Direct entry: ≥{CONFIG['ENTRY_MIN_PRICE']:.0%}")
-    log.info(f"[MAIN] Watchlist: {CONFIG['WATCHLIST_MIN_PRICE']:.0%}-{CONFIG['ENTRY_MIN_PRICE']:.0%}")
-    log.info(f"[MAIN] Max days: {CONFIG['MAX_DAYS_LEFT']}, ROI≥{CONFIG['MIN_ROI']:.0%}")
-    log.info(f"[MAIN] Max stake: ${CONFIG['MAX_STAKE']}, MAX_LOSS: ${CONFIG['MAX_LOSS_PER_POS']}, Rapid drop: {CONFIG.get('RAPID_DROP_PCT', 0.07)*100:.0f}¢")
-    log.info(f"[MAIN] Max open: {CONFIG['MAX_OPEN']}, per theme: {CONFIG['MAX_PER_THEME']}")
-    log.info(f"[MAIN] Spread: <{CONFIG['MAX_SPREAD']:.0%}, Quality≥{CONFIG['MIN_QUALITY_SCORE']}")
-    log.info("=" * 60)
+    log.info("[MAIN] quant-micro v3 starting — loading config from DB…")
 
     db = Database()
     await db.init()
@@ -257,6 +248,18 @@ async def main():
 
     ws_task = asyncio.create_task(ws.connect())
     await _reload_config(db)
+
+    # Effective config banner — printed AFTER DB overrides are merged
+    log.info("=" * 60)
+    log.info("[MAIN] quant-micro v3 (resolution harvester)")
+    log.info(f"[MAIN] Simulation: {CONFIG['SIMULATION']}")
+    log.info(f"[MAIN] Direct entry: ≥{CONFIG['ENTRY_MIN_PRICE']:.0%}")
+    log.info(f"[MAIN] Watchlist: {CONFIG['WATCHLIST_MIN_PRICE']:.0%}-{CONFIG['ENTRY_MIN_PRICE']:.0%}")
+    log.info(f"[MAIN] Max days: {CONFIG['MAX_DAYS_LEFT']}, ROI≥{CONFIG['MIN_ROI']:.1%}")
+    log.info(f"[MAIN] Max stake: ${CONFIG['MAX_STAKE']}, MAX_LOSS: ${CONFIG['MAX_LOSS_PER_POS']}, Rapid drop: {CONFIG.get('RAPID_DROP_PCT', 0.07)*100:.0f}¢")
+    log.info(f"[MAIN] Max open: {CONFIG['MAX_OPEN']}, per theme: {CONFIG['MAX_PER_THEME']}, per negRisk: {CONFIG.get('MAX_PER_NEG_RISK', 3)}")
+    log.info(f"[MAIN] Spread: <{CONFIG['MAX_SPREAD']:.0%}, Quality≥{CONFIG['MIN_QUALITY_SCORE']}, Bankroll: ${CONFIG['BANKROLL']:.0f}, Tag: {CONFIG['CONFIG_TAG']}")
+    log.info("=" * 60)
 
     await tg.send(
         f"<b>quant-micro v3 started</b>\n"

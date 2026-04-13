@@ -378,6 +378,9 @@ class MicroScanner:
         watchlist = []
         seen = set()
         skipped_no_date = 0
+        # Top near-certain markets we had to skip because endDate was missing/past.
+        # Logged once as a compact summary at end of scan instead of per-market.
+        no_date_samples: list[tuple[float, str, str]] = []
         self._scanned_market_ids = set()  # all active market IDs from this scan
 
         try:
@@ -473,8 +476,9 @@ class MicroScanner:
 
                 if days_left < 0:
                     skipped_no_date += 1
-                    if yes_price >= 0.90 or no_price >= 0.90:
-                        log.info(f"[NO-DATE] {question[:60]} | YES={yes_price:.2f} NO={no_price:.2f} | endDate={end_str}")
+                    max_side = max(yes_price, no_price)
+                    if max_side >= 0.90:
+                        no_date_samples.append((max_side, question[:60], end_str or "None"))
                     continue
                 if days_left > max_days:
                     continue
@@ -581,6 +585,14 @@ class MicroScanner:
                 f"{len(watchlist)} watchlist ({wl_min:.0%}-{entry_price:.0%}), "
                 f"≤{max_days:.0f}d | skipped {skipped_no_date} no-date"
             )
+            # Compact summary of near-certain markets we skipped due to missing/past endDate —
+            # helpful to spot Polymarket `closed` flag lag without per-market spam.
+            if no_date_samples:
+                no_date_samples.sort(reverse=True)
+                top = no_date_samples[:3]
+                parts = [f"{q[:40]} ({max(0,p)*100:.0f}¢, end={e})" for p, q, e in top]
+                extra = f" +{len(no_date_samples)-3} more" if len(no_date_samples) > 3 else ""
+                log.info(f"[Scanner] no-date ≥90¢ top: {' | '.join(parts)}{extra}")
             return direct, watchlist
 
         except Exception as e:
