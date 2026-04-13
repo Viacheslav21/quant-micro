@@ -178,7 +178,7 @@ async def main():
     log.info(f"[MAIN] Direct entry: ≥{CONFIG['ENTRY_MIN_PRICE']:.0%}")
     log.info(f"[MAIN] Watchlist: {CONFIG['WATCHLIST_MIN_PRICE']:.0%}-{CONFIG['ENTRY_MIN_PRICE']:.0%}")
     log.info(f"[MAIN] Max days: {CONFIG['MAX_DAYS_LEFT']}, ROI≥{CONFIG['MIN_ROI']:.0%}")
-    log.info(f"[MAIN] Max stake: ${CONFIG['MAX_STAKE']}, SL: 7-10% (dynamic)")
+    log.info(f"[MAIN] Max stake: ${CONFIG['MAX_STAKE']}, MAX_LOSS: ${CONFIG['MAX_LOSS_PER_POS']}, Rapid drop: {CONFIG.get('RAPID_DROP_PCT', 0.07)*100:.0f}¢")
     log.info(f"[MAIN] Max open: {CONFIG['MAX_OPEN']}, per theme: {CONFIG['MAX_PER_THEME']}")
     log.info(f"[MAIN] Spread: <{CONFIG['MAX_SPREAD']:.0%}, Quality≥{CONFIG['MIN_QUALITY_SCORE']}")
     log.info("=" * 60)

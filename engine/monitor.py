@@ -200,7 +200,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
     check_pnl_pct = (check_price - entry_price) / entry_price if entry_price > 0 else 0
     pnl = check_pnl_pct * stake - calc_exit_fee(stake, entry_price, config)
     if await _do_close(pos, pnl, "LOSS", "rapid_drop", **close_kw):
-        log.info(f"[RAPID DROP] LOSS {side} '{pos['question'][:40]}' PnL: ${pnl:.2f} ({pnl_pct:+.1%})")
+        log.info(f"[RAPID DROP] LOSS {side} '{pos['question'][:40]}' PnL: ${pnl:.2f} ({check_pnl_pct:+.1%})")
         msg = _tg_base(pos, bid_price, pnl, "⚡ <b>RAPID DROP</b>")
         msg += f"\n⏱ До expiry: {days_to_expiry:.1f}d"
         await tg.send(msg)

@@ -265,8 +265,6 @@ class MicroWS:
             new_price = self._side_price(ws_key, raw)
 
             info["price"] = new_price
-            # Sync best_bid from authoritative price — book events are incremental
-            # and can set stale lower bids from non-top levels
             info["best_bid"] = new_price
             info["last_update"] = time.time()
             await self._dispatch(ws_key, info)
