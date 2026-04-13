@@ -238,12 +238,16 @@ _BINARY_RISK_PATTERNS = [
     re.compile(r"between.*\$[\d,]+.*and.*\$[\d,]+", re.I),  # "between $70k and $72k" — range bet
     re.compile(r"between.*\d+[°ºc].*and.*\d+[°ºc]", re.I),  # "between 20°C and 25°C" — temp range
     re.compile(r"between.*\d+%.*and.*\d+%", re.I),     # "between 2.5% and 3.0%" — rate range
+    re.compile(r"game \d+ winner", re.I),               # "Game 2 Winner" — single live game, resolves in 15-40 min
+    re.compile(r"map \d+ winner", re.I),                # "Map 2 Winner" — single CS/Valorant map, same risk
 ]
 
 
 def is_binary_risk(question: str) -> bool:
     """Check if market can lose entire stake instantly (no gradual price decline).
-    These markets resolve to 0 without intermediate prices for SL to catch."""
+    These markets resolve to 0 without intermediate prices for SL to catch.
+    Includes per-game/per-map esports winner markets: a single live game resolves
+    in 15-40 min and can flip from 95¢+ to $0 on a single upset."""
     return any(p.search(question) for p in _BINARY_RISK_PATTERNS)
 
 
