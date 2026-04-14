@@ -17,6 +17,16 @@ log = logging.getLogger("micro")
 _rest_cooldown: dict = {}
 _REST_COOLDOWN_SEC = 60
 
+# Rapid drop block counter: how many consecutive times REST blocked a rapid drop per ws_key.
+# After 3 blocks we trust the WS bid directly — REST midpoint/last-trade lags order book
+# during fast moves (e.g. BTC approaching a price target).
+_rapid_drop_blocks: dict = {}  # ws_key → int
+
+# Price history throttle: record tick only when price moves ≥0.3¢ or ≥30s since last record
+_price_last_recorded: dict = {}  # ws_key → (price, timestamp)
+_PRICE_RECORD_MIN_CHANGE = 0.003   # 0.3¢
+_PRICE_RECORD_MIN_INTERVAL = 30.0  # seconds
+
 
 def cleanup_stale_cooldowns():
     """Remove expired cooldown entries to prevent unbounded growth."""
@@ -24,6 +34,10 @@ def cleanup_stale_cooldowns():
     stale = [k for k, v in _rest_cooldown.items() if now - v > 3600]
     for k in stale:
         del _rest_cooldown[k]
+    # Also clear block counters for markets no longer active (closed > 1h ago)
+    # We don't have a timestamp here so just cap at a safe size
+    if len(_rapid_drop_blocks) > 200:
+        _rapid_drop_blocks.clear()
 
 
 @retry(stop=stop_after_attempt(2), wait=wait_fixed(1),
@@ -66,6 +80,8 @@ async def _do_close(pos, pnl, result, reason, ws_key,
     p = pos_cache.pop(ws_key, None)
     if p:
         pos_last_db_write.pop(p.get("id"), None)
+    _price_last_recorded.pop(ws_key, None)
+    _rapid_drop_blocks.pop(ws_key, None)
     await db.recalibrate_theme(pos.get("theme", "other"))
     return True
 
@@ -126,6 +142,14 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         await db.update_position_price(pos["id"], bid_price, round(pnl_dollar, 4))
         pos_last_db_write[pos["id"]] = now_ts
 
+    # Record price tick for path history (throttled: ≥0.3¢ change or ≥30s interval)
+    last_rec = _price_last_recorded.get(ws_key)
+    if (last_rec is None
+            or abs(bid_price - last_rec[0]) >= _PRICE_RECORD_MIN_CHANGE
+            or now_ts - last_rec[1] >= _PRICE_RECORD_MIN_INTERVAL):
+        _price_last_recorded[ws_key] = (bid_price, now_ts)
+        await db.record_price_tick(market_id, side, bid_price, "ws")
+
     close_kw = dict(ws_key=ws_key, db=db, ws=ws,
                     pos_cache=pos_cache, pos_last_db_write=pos_last_db_write,
                     exit_price=bid_price)
@@ -175,6 +199,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
     rapid_drop_abs = config.get("RAPID_DROP_PCT", 0.07)
 
     if bid_price >= entry_price - rapid_drop_abs:
+        _rapid_drop_blocks.pop(ws_key, None)  # price recovered — reset block counter
         return  # no rapid drop
 
     # REST cooldown
@@ -183,14 +208,24 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         return
     _rest_cooldown[market_id] = now_ts
 
-    # REST verify
-    rest_price, vol_24h = await _verify_price_and_volume(http_client, market_id, side)
-    check_price = rest_price if rest_price is not None else bid_price
+    # After 3 consecutive REST blocks, bypass REST verification: Gamma REST
+    # returns midpoint/last-trade which lags the live order book during fast moves.
+    # At that point the WS bid is more reliable than the stale REST price.
+    blocks = _rapid_drop_blocks.get(ws_key, 0)
+    if blocks >= 3:
+        log.info(f"[RAPID DROP] Bypassing REST after {blocks} blocks — trusting WS bid={bid_price:.4f}")
+        rest_price, vol_24h = None, None
+        check_price = bid_price
+    else:
+        # REST verify
+        rest_price, vol_24h = await _verify_price_and_volume(http_client, market_id, side)
+        check_price = rest_price if rest_price is not None else bid_price
 
-    if check_price >= entry_price - rapid_drop_abs:
-        if rest_price is not None:
-            log.info(f"[RAPID DROP BLOCKED] {market_id[:8]} {side} WS={bid_price:.4f} but REST={rest_price:.4f}")
-        return
+        if check_price >= entry_price - rapid_drop_abs:
+            if rest_price is not None:
+                _rapid_drop_blocks[ws_key] = blocks + 1
+                log.info(f"[RAPID DROP BLOCKED] {market_id[:8]} {side} WS={bid_price:.4f} REST={rest_price:.4f} (block #{blocks+1})")
+            return
 
     # Volume confirmation
     if vol_24h is not None and vol_24h < 5000:
@@ -204,3 +239,55 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         msg = _tg_base(pos, bid_price, pnl, "⚡ <b>RAPID DROP</b>")
         msg += f"\n⏱ До expiry: {days_to_expiry:.1f}d"
         await tg.send(msg)
+
+
+# WS silence threshold: if no tick received for this many seconds, trigger REST poll
+_WS_STALE_SEC = 300  # 5 minutes
+
+
+async def rest_poll_stale_positions(open_positions: list,
+                                    db, ws: MicroWS, tg,
+                                    config: dict, http_client,
+                                    pos_cache: dict, pos_last_db_write: dict,
+                                    shutdown: bool):
+    """REST-poll positions where WS has been silent for ≥5 minutes.
+    Safety net for markets where Polymarket WS sends no ticks (low liquidity,
+    inactive order book) — price can move significantly without monitor being called."""
+    if shutdown:
+        return
+    now = time.time()
+    stale = []
+    for pos in open_positions:
+        ws_key = f"{pos['market_id']}_{pos['side']}"
+        info = ws.prices.get(ws_key, {})
+        last_update = info.get("last_update", 0)
+        if now - last_update >= _WS_STALE_SEC:
+            stale.append((ws_key, pos))
+
+    if not stale:
+        return
+
+    log.info(f"[REST POLL] {len(stale)} stale positions (WS silent ≥{_WS_STALE_SEC}s)")
+    for ws_key, pos in stale:
+        market_id, side = pos["market_id"], pos["side"]
+        rest_price, _ = await _verify_price_and_volume(http_client, market_id, side)
+        if rest_price is None:
+            continue
+        # Record to price history so we can see the gap
+        await db.record_price_tick(market_id, side, rest_price, "rest_poll")
+        log.debug(f"[REST POLL] {ws_key} price={rest_price:.4f}")
+        # Inject into WS info so check_position_price uses REST price
+        if ws_key not in ws.prices:
+            ws.prices[ws_key] = {}
+        ws.prices[ws_key]["best_bid"] = rest_price
+        ws.prices[ws_key]["price"] = rest_price
+        ws.prices[ws_key]["last_update"] = now
+        # Run full exit logic with the REST price
+        await check_position_price(
+            ws_key=ws_key, price=rest_price,
+            info={"best_bid": rest_price},
+            db=db, ws=ws, tg=tg, config=config,
+            http_client=http_client,
+            pos_cache=pos_cache, pos_last_db_write=pos_last_db_write,
+            shutdown=shutdown,
+        )

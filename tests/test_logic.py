@@ -3,7 +3,7 @@ Unit tests for core micro logic.
 Run: python tests/test_logic.py
 No external deps — mocks DB/WS/Telegram, tests pure logic.
 """
-import sys, os, asyncio
+import sys, os, asyncio, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -69,6 +69,9 @@ class MockDB:
 
     async def get_watchlist_market(self, market_id, side=None):
         return None
+
+    async def record_price_tick(self, market_id, side, price, source="ws"):
+        pass  # no-op in tests — price history not verified at DB level
 
 
 class MockWS:
@@ -583,6 +586,250 @@ pos_cache = {"mkt1_YES": POS.copy()}
 run(check_position_price("mkt1_YES", 0.99, {"best_bid": 0.99},
     db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, pos_writes, True))  # shutdown=True
 check("Shutdown: no action on position", len(db.closed) == 0)
+
+
+# ══════════════════════════════════════
+# 12. Binary risk: game/map winner markets
+# ══════════════════════════════════════
+print("\n\033[1m12. Binary Risk: Game/Map Winner\033[0m")
+
+from engine.scanner import is_binary_risk
+
+check("Block: Game 1 Winner", is_binary_risk("LoL: Sentinels vs Cloud9 - Game 1 Winner"))
+check("Block: Game 2 Winner", is_binary_risk("LoL: Sentinels vs Cloud9 - Game 2 Winner"))
+check("Block: Game 3 Winner", is_binary_risk("Counter-Strike: Astralis vs FUT - Game 3 Winner"))
+check("Block: Map 1 Winner",  is_binary_risk("Counter-Strike: Astralis vs FUT Esports - Map 1 Winner"))
+check("Block: Map 2 Winner",  is_binary_risk("Valorant: FURIA vs NRG - Map 2 Winner"))
+check("Block: Map 3 Winner",  is_binary_risk("Valorant: FURIA vs NRG - Map 3 Winner"))
+check("Block: case-insensitive", is_binary_risk("LoL: T1 vs GEN - game 2 winner"))
+check("Allow: BO3 series",    not is_binary_risk("LoL: Sentinels vs Cloud9 (BO3) - LCS Regular Season"))
+check("Allow: BO5 series",    not is_binary_risk("LoL: T1 vs GEN (BO5) - Worlds Final"))
+check("Allow: Map Handicap",  not is_binary_risk("Map Handicap: AUR (-1.5) vs HOTU (+1.5)"))
+check("Allow: Map winner (no number)", not is_binary_risk("Who wins the map vote?"))
+
+
+# ══════════════════════════════════════
+# 13. Rapid drop block counter
+# ══════════════════════════════════════
+print("\n\033[1m13. Rapid Drop Block Counter\033[0m")
+
+import engine.monitor as _mon
+from engine.monitor import check_position_price, _rest_cooldown, _rapid_drop_blocks
+
+far_end_13 = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
+POS_13 = {
+    "id": "pos13", "market_id": "mkt13", "side": "YES", "question": "BTC $74k?",
+    "entry_price": 0.945, "stake_amt": 20, "theme": "crypto",
+    "end_date": far_end_13,
+}
+
+
+class MockDBWithRestPrice(MockDB):
+    """DB mock that tracks price ticks and supports configurable REST price."""
+    def __init__(self, open_positions=None, rest_price=None):
+        super().__init__(open_positions=open_positions)
+        self.rest_price = rest_price  # what _verify_price_and_volume will return
+        self.price_ticks = []
+
+    async def record_price_tick(self, market_id, side, price, source="ws"):
+        self.price_ticks.append({"market_id": market_id, "side": side, "price": price, "source": source})
+
+
+# Patch _verify_price_and_volume to return controlled REST price
+import unittest.mock as mock
+
+async def _rest_above_threshold(*a, **kw):
+    return 0.90, 100000.0  # above threshold (entry=0.945, threshold=0.875)
+
+async def _rest_none(*a, **kw):
+    return None, None
+
+# Test 1: REST blocks rapid drop → block counter increments
+_rest_cooldown.clear()
+_rapid_drop_blocks.clear()
+with mock.patch("engine.monitor._verify_price_and_volume", _rest_above_threshold):
+    db = MockDBWithRestPrice(open_positions=[POS_13])
+    pos_cache = {"mkt13_YES": POS_13.copy()}
+    # bid=0.86 → drop 8.5¢ > 7¢ threshold → triggers rapid drop check
+    run(check_position_price("mkt13_YES", 0.86, {"best_bid": 0.86},
+        db, MockWS(), MockTG(), BASE_CONFIG, object(), pos_cache, {}, False))
+    check("Block #1: REST above threshold → no close", len(db.closed) == 0)
+    check("Block #1: counter = 1", _rapid_drop_blocks.get("mkt13_YES", 0) == 1)
+
+# Test 2: second block → counter = 2
+_rest_cooldown.clear()
+with mock.patch("engine.monitor._verify_price_and_volume", _rest_above_threshold):
+    db = MockDBWithRestPrice(open_positions=[POS_13])
+    pos_cache = {"mkt13_YES": POS_13.copy()}
+    run(check_position_price("mkt13_YES", 0.86, {"best_bid": 0.86},
+        db, MockWS(), MockTG(), BASE_CONFIG, object(), pos_cache, {}, False))
+    check("Block #2: counter = 2", _rapid_drop_blocks.get("mkt13_YES", 0) == 2)
+
+# Test 3: third block → counter = 3
+_rest_cooldown.clear()
+with mock.patch("engine.monitor._verify_price_and_volume", _rest_above_threshold):
+    db = MockDBWithRestPrice(open_positions=[POS_13])
+    pos_cache = {"mkt13_YES": POS_13.copy()}
+    run(check_position_price("mkt13_YES", 0.86, {"best_bid": 0.86},
+        db, MockWS(), MockTG(), BASE_CONFIG, object(), pos_cache, {}, False))
+    check("Block #3: counter = 3", _rapid_drop_blocks.get("mkt13_YES", 0) == 3)
+
+# Test 4: 4th attempt → bypass REST (blocks≥3), use WS bid → closes
+_rest_cooldown.clear()
+with mock.patch("engine.monitor._verify_price_and_volume", _rest_above_threshold):
+    db = MockDBWithRestPrice(open_positions=[POS_13])
+    pos_cache = {"mkt13_YES": POS_13.copy()}
+    run(check_position_price("mkt13_YES", 0.86, {"best_bid": 0.86},
+        db, MockWS(), MockTG(), BASE_CONFIG, object(), pos_cache, {}, False))
+    check("Bypass: closes after 3 blocks", len(db.closed) == 1)
+    check("Bypass: reason=rapid_drop", db.closed[0]["reason"] == "rapid_drop")
+
+# Test 5: price recovery resets block counter
+_rest_cooldown.clear()
+_rapid_drop_blocks["mkt13_YES"] = 2  # simulate 2 prior blocks
+db = MockDBWithRestPrice(open_positions=[POS_13])
+pos_cache = {"mkt13_YES": POS_13.copy()}
+# price recovers above threshold (entry=0.945, threshold=0.875, bid=0.90 > 0.875)
+run(check_position_price("mkt13_YES", 0.90, {"best_bid": 0.90},
+    db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, {}, False))
+check("Recovery: counter reset to 0", _rapid_drop_blocks.get("mkt13_YES", 0) == 0)
+check("Recovery: no close", len(db.closed) == 0)
+
+# Test 6: counter cleared on position close
+_rest_cooldown.clear()
+_rapid_drop_blocks.clear()
+_rapid_drop_blocks["mkt13_YES"] = 3
+db = MockDBWithRestPrice(open_positions=[POS_13])
+pos_cache = {"mkt13_YES": POS_13.copy()}
+# WIN resolution clears block counter
+run(check_position_price("mkt13_YES", 0.995, {"best_bid": 0.995},
+    db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, {}, False))
+check("Close (WIN): block counter cleared", "mkt13_YES" not in _rapid_drop_blocks)
+
+
+# ══════════════════════════════════════
+# 14. rest_poll_stale_positions
+# ══════════════════════════════════════
+print("\n\033[1m14. REST Poll Stale Positions\033[0m")
+
+from engine.monitor import rest_poll_stale_positions
+
+OPEN_POS_14 = [
+    {"id": "p1", "market_id": "mkt14a", "side": "NO", "question": "BTC $74k?",
+     "entry_price": 0.945, "stake_amt": 20, "theme": "crypto",
+     "end_date": far_end_13},
+    {"id": "p2", "market_id": "mkt14b", "side": "YES", "question": "ETH $2k?",
+     "entry_price": 0.92, "stake_amt": 20, "theme": "crypto",
+     "end_date": far_end_13},
+]
+
+# Fresh positions (last_update recent) → NOT polled
+ws_fresh = MockWS()
+ws_fresh.prices = {
+    "mkt14a_NO":  {"last_update": time.time(), "price": 0.93, "best_bid": 0.93},
+    "mkt14b_YES": {"last_update": time.time(), "price": 0.93, "best_bid": 0.93},
+}
+db = MockDBWithRestPrice(open_positions=OPEN_POS_14)
+_rest_cooldown.clear()
+async def _rest_fresh(*a, **kw): return 0.93, 100000.0
+with mock.patch("engine.monitor._verify_price_and_volume", _rest_fresh):
+    run(rest_poll_stale_positions(OPEN_POS_14, db=db, ws=ws_fresh, tg=MockTG(),
+        config=BASE_CONFIG, http_client=object(),
+        pos_cache={}, pos_last_db_write={}, shutdown=False))
+check("Fresh positions: not polled (no close)", len(db.closed) == 0)
+
+# Stale position (last_update old) → polled → resolution WIN
+ws_stale = MockWS()
+ws_stale.prices = {
+    "mkt14a_NO":  {"last_update": time.time() - 400, "price": 0.93, "best_bid": 0.93},
+    "mkt14b_YES": {"last_update": time.time(), "price": 0.93, "best_bid": 0.93},
+}
+db = MockDBWithRestPrice(open_positions=OPEN_POS_14)
+_rest_cooldown.clear()
+async def _rest_win(*a, **kw): return 0.995, 100000.0  # WIN price
+with mock.patch("engine.monitor._verify_price_and_volume", _rest_win):
+    run(rest_poll_stale_positions(OPEN_POS_14, db=db, ws=ws_stale, tg=MockTG(),
+        config=BASE_CONFIG, http_client=object(),
+        pos_cache={}, pos_last_db_write={}, shutdown=False))
+check("Stale position: polled and WIN-resolved", len(db.closed) == 1)
+check("Stale position: price tick recorded (rest_poll)", any(
+    t["source"] == "rest_poll" for t in db.price_ticks))
+
+# Shutdown flag → nothing happens
+ws_stale2 = MockWS()
+ws_stale2.prices = {"mkt14a_NO": {"last_update": time.time() - 400}}
+db = MockDBWithRestPrice(open_positions=OPEN_POS_14)
+run(rest_poll_stale_positions(OPEN_POS_14, db=db, ws=ws_stale2, tg=MockTG(),
+    config=BASE_CONFIG, http_client=object(),
+    pos_cache={}, pos_last_db_write={}, shutdown=True))
+check("Shutdown: stale position not polled", len(db.closed) == 0)
+
+# REST returns None → no action
+ws_stale3 = MockWS()
+ws_stale3.prices = {"mkt14a_NO": {"last_update": time.time() - 400, "price": 0.93, "best_bid": 0.93}}
+db = MockDBWithRestPrice(open_positions=OPEN_POS_14)
+_rest_cooldown.clear()
+with mock.patch("engine.monitor._verify_price_and_volume", _rest_none):
+    run(rest_poll_stale_positions(OPEN_POS_14, db=db, ws=ws_stale3, tg=MockTG(),
+        config=BASE_CONFIG, http_client=object(),
+        pos_cache={}, pos_last_db_write={}, shutdown=False))
+check("REST returns None: no close", len(db.closed) == 0)
+
+
+# ══════════════════════════════════════
+# 15. Price history recording throttle
+# ══════════════════════════════════════
+print("\n\033[1m15. Price History Recording\033[0m")
+
+import engine.monitor as _mon_mod
+
+_rest_cooldown.clear()
+_rapid_drop_blocks.clear()
+_mon_mod._price_last_recorded.clear()
+
+class MockDBTicks(MockDB):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.ticks = []
+    async def record_price_tick(self, market_id, side, price, source="ws"):
+        self.ticks.append((price, source))
+
+POS_15 = {
+    "id": "pos15", "market_id": "mkt15", "side": "YES", "question": "Test?",
+    "entry_price": 0.95, "stake_amt": 20, "theme": "other",
+    "end_date": far_end_13,
+}
+
+# First call → always recorded
+db = MockDBTicks(open_positions=[POS_15])
+pos_cache = {"mkt15_YES": POS_15.copy()}
+run(check_position_price("mkt15_YES", 0.95, {"best_bid": 0.95},
+    db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, {}, False))
+check("First tick: recorded", len(db.ticks) == 1)
+
+# Same price immediately after → NOT recorded (< 0.3¢ change, < 30s)
+db2 = MockDBTicks(open_positions=[POS_15])
+pos_cache2 = {"mkt15_YES": POS_15.copy()}
+run(check_position_price("mkt15_YES", 0.951, {"best_bid": 0.951},
+    db2, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache2, {}, False))
+check("Tiny move (0.1¢): NOT recorded", len(db2.ticks) == 0)
+
+# Price moves ≥0.3¢ → recorded regardless of time
+db3 = MockDBTicks(open_positions=[POS_15])
+pos_cache3 = {"mkt15_YES": POS_15.copy()}
+run(check_position_price("mkt15_YES", 0.947, {"best_bid": 0.947},
+    db3, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache3, {}, False))
+check("Move ≥0.3¢ (0.3¢): recorded", len(db3.ticks) == 1)
+
+# Simulate ≥30s elapsed → recorded even for tiny move
+_mon_mod._price_last_recorded["mkt15_YES"] = (0.95, time.time() - 35)
+db4 = MockDBTicks(open_positions=[POS_15])
+pos_cache4 = {"mkt15_YES": POS_15.copy()}
+run(check_position_price("mkt15_YES", 0.951, {"best_bid": 0.951},
+    db4, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache4, {}, False))
+check("≥30s elapsed: recorded despite tiny move", len(db4.ticks) == 1)
+
+_mon_mod._price_last_recorded.clear()
 
 
 # ── Results ──

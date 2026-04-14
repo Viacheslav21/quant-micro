@@ -20,7 +20,7 @@ load_dotenv()
 from engine.scanner import MicroScanner, classify_theme
 from engine.ws_client import MicroWS
 from engine.entry import try_enter, check_watchlist_price
-from engine.monitor import check_position_price, cleanup_stale_cooldowns
+from engine.monitor import check_position_price, cleanup_stale_cooldowns, rest_poll_stale_positions
 from engine.resolver import check_expired_positions, check_event_cascade
 from utils.db import Database
 from utils.telegram import TelegramBot
@@ -410,7 +410,14 @@ async def main():
             theme_str = ", ".join(f"{t}={n}" for t, n in sorted(themes.items(), key=lambda x: -x[1]))
             log.info(f"[SCAN #{scan_count}] Skip/{reason}: {theme_str}")
 
-        # 7. Daily report (once per day, first scan after midnight UTC)
+        # 7. REST-poll positions where WS has been silent ≥5 min (safety net for illiquid markets)
+        await rest_poll_stale_positions(
+            open_pos, db=db, ws=ws, tg=tg, config=CONFIG,
+            http_client=http_client, pos_cache=_pos_cache,
+            pos_last_db_write=_pos_last_db_write, shutdown=_shutdown,
+        )
+
+        # 8. Daily report (once per day, first scan after midnight UTC)
         await _send_daily_report(db, tg, CONFIG)
 
         # 8. Cleanup stale WS (every 30 scans)

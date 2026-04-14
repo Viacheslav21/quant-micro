@@ -143,6 +143,19 @@ class Database:
             for col in ["sl_pct", "tp_pct"]:
                 await conn.execute(f"ALTER TABLE micro_positions DROP COLUMN IF EXISTS {col}")
             # No default theme blocking — managed entirely via dashboard
+            # Price path history for debugging position exits
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS micro_price_history (
+                    id         BIGSERIAL PRIMARY KEY,
+                    market_id  TEXT NOT NULL,
+                    side       TEXT NOT NULL,
+                    price      REAL NOT NULL,
+                    source     TEXT NOT NULL DEFAULT 'ws',
+                    ts         TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_price_history_lookup
+                    ON micro_price_history (market_id, side, ts DESC);
+            """)
         log.info("[DB] Schema ready")
 
     async def get_config_overrides(self, service: str) -> dict:
@@ -343,6 +356,35 @@ class Database:
             await conn.execute("DELETE FROM micro_positions")
             await conn.execute("DELETE FROM micro_watchlist")
         log.info("[DB] Full reset: all positions/watchlist cleared")
+
+    # ── Price History ──
+
+    async def record_price_tick(self, market_id: str, side: str, price: float, source: str = "ws"):
+        """Append a price tick to micro_price_history. Called from monitor on significant moves."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO micro_price_history (market_id, side, price, source) VALUES ($1, $2, $3, $4)",
+                market_id, side, price, source,
+            )
+
+    async def get_price_history(self, market_id: str, side: str):
+        """Fetch price path for a position (for debugging / dashboard)."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT price, source, ts FROM micro_price_history "
+                "WHERE market_id=$1 AND side=$2 ORDER BY ts",
+                market_id, side,
+            )
+        return [{"price": r["price"], "source": r["source"], "ts": r["ts"].isoformat()} for r in rows]
+
+    async def cleanup_price_history(self, days: int = 3):
+        """Delete price history older than N days to avoid unbounded growth."""
+        async with self.pool.acquire() as conn:
+            deleted = await conn.execute(
+                "DELETE FROM micro_price_history WHERE ts < NOW() - $1::interval",
+                f"{days} days",
+            )
+            log.debug(f"[DB] Price history cleanup: {deleted}")
 
     # ── Cleanup ──
 
