@@ -19,7 +19,7 @@ load_dotenv()
 
 from engine.scanner import MicroScanner, classify_theme
 from engine.ws_client import MicroWS
-from engine.entry import try_enter, check_watchlist_price
+from engine.entry import try_enter, check_watchlist_price, update_watchlist_cache
 from engine.monitor import check_position_price, cleanup_stale_cooldowns, rest_poll_stale_positions
 from engine.resolver import check_expired_positions, check_event_cascade
 from utils.db import Database
@@ -51,11 +51,16 @@ CONFIG = {
     "MAX_PER_THEME":      int(os.getenv("MAX_PER_THEME", "5")),
     "MAX_PER_NEG_RISK":   int(os.getenv("MAX_PER_NEG_RISK", "3")),
     "CONFIG_TAG":         os.getenv("CONFIG_TAG", "micro-v4"),
-    "SCAN_PAGES":         int(os.getenv("SCAN_PAGES", "16")),
     "MIN_VOLUME":         float(os.getenv("MIN_VOLUME", "50000")),
     "MIN_QUALITY_SCORE":  float(os.getenv("MIN_QUALITY_SCORE", "40")),
     "SLIPPAGE":           float(os.getenv("SLIPPAGE", "0.005")),    # 0.5¢ per side
     "FEE_PCT":            float(os.getenv("FEE_PCT", "0.02")),      # 2% round-trip fee
+    # Early take-profit: sell at TP price when enough time left to redeploy capital
+    "TAKE_PROFIT_PRICE":  float(os.getenv("TAKE_PROFIT_PRICE", "0.98")),
+    "TAKE_PROFIT_MIN_DAYS": float(os.getenv("TAKE_PROFIT_MIN_DAYS", "1.0")),
+    # Dynamic max stake by time to expiry — higher certainty = bigger bet
+    "MAX_STAKE_6H":       float(os.getenv("MAX_STAKE_6H", "50.0")),   # ≤6h to expiry
+    "MAX_STAKE_1D":       float(os.getenv("MAX_STAKE_1D", "35.0")),   # ≤1d to expiry
 }
 
 # ── Logging ──
@@ -85,6 +90,7 @@ _SAFE_CONFIG_KEYS = {
     "MAX_STAKE", "MIN_STAKE", "MAX_OPEN", "MAX_PER_THEME",
     "MAX_DAYS_LEFT", "MIN_VOLUME", "SCAN_INTERVAL", "CONFIG_TAG", "MAX_PER_NEG_RISK",
     "BANKROLL", "SLIPPAGE", "FEE_PCT",
+    "TAKE_PROFIT_PRICE", "TAKE_PROFIT_MIN_DAYS", "MAX_STAKE_6H", "MAX_STAKE_1D",
 }
 
 
@@ -346,13 +352,17 @@ async def main():
         nonlocal scan_count
         global _peak_equity
 
-        # 1. Fetch candidates (builds active market IDs)
-        direct, watchlist = await scanner.fetch_candidates()
+        # 1. Fetch candidates + open positions in parallel (independent queries)
+        (direct, watchlist), open_pos = await asyncio.gather(
+            scanner.fetch_candidates(),
+            db.get_open_positions(),
+        )
 
-        # 2. Check expired + disappeared positions
+        # 2. Check expired + disappeared positions (reuse open_pos — no extra DB query)
         await check_expired_positions(db, ws, tg, http_client, CONFIG,
                                        _pos_cache, _pos_last_db_write,
-                                       active_market_ids=getattr(scanner, '_scanned_market_ids', None))
+                                       active_market_ids=getattr(scanner, '_scanned_market_ids', None),
+                                       open_positions=open_pos)
 
         # 3. Direct entries
         entered = 0
@@ -361,7 +371,8 @@ async def main():
         for c in direct:
             if _shutdown:
                 break
-            result = await try_enter(c, db, ws, tg, CONFIG, _pos_cache, source="scan")
+            result = await try_enter(c, db, ws, tg, CONFIG, _pos_cache, source="scan",
+                                     open_positions=open_pos)
             if result is True:
                 entered += 1
             elif isinstance(result, str):
@@ -376,6 +387,7 @@ async def main():
         # 5. Watchlist → WS
         if watchlist:
             await db.upsert_watchlist_batch(watchlist)
+            update_watchlist_cache(watchlist)  # keep in-memory cache fresh
         new_ws = 0
         for c in watchlist:
             ws_key = f"{c['market_id']}_{c['side']}"
@@ -388,9 +400,11 @@ async def main():
                     await ws.subscribe_tokens(tokens)
                     new_ws += 1
 
-        # 6. Status
-        open_pos = await db.get_open_positions()
-        stats = await db.get_stats(CONFIG["BANKROLL"])
+        # 6. Status — refresh open_pos to reflect entries made this cycle
+        open_pos, stats = await asyncio.gather(
+            db.get_open_positions(),
+            db.get_stats(CONFIG["BANKROLL"]),
+        )
         bankroll = stats.get("bankroll", CONFIG["BANKROLL"])
         total_unrealized = sum(p.get("unrealized_pnl", 0) for p in open_pos)
         equity = bankroll + total_unrealized

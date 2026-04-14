@@ -18,10 +18,12 @@ log = logging.getLogger("micro")
 async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot,
                                    http_client: httpx.AsyncClient, config: dict,
                                    pos_cache: dict, pos_last_db_write: dict,
-                                   active_market_ids: set = None):
+                                   active_market_ids: set = None,
+                                   open_positions: list = None):
     """Check positions via REST: resolved → proper payout, 72h past expiry → force close.
-    Also checks positions whose market disappeared from active scan (closed/resolved early)."""
-    open_pos = await db.get_open_positions()
+    Also checks positions whose market disappeared from active scan (closed/resolved early).
+    Pass open_positions to reuse the scan-cycle's cached list and skip the DB query."""
+    open_pos = open_positions if open_positions is not None else await db.get_open_positions()
     now = datetime.now(timezone.utc)
 
     to_check = []

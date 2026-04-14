@@ -359,7 +359,6 @@ class MicroScanner:
     def __init__(self, config: dict):
         self.config = config
         self.client = httpx.AsyncClient(timeout=15.0)
-        self._pages = int(config.get("SCAN_PAGES", 16))  # 1600 markets max
         # Event cascade: negRiskMarketID → list of sibling market info
         self.event_siblings: dict[str, list[dict]] = {}
 
@@ -388,22 +387,23 @@ class MicroScanner:
         self._scanned_market_ids = set()  # all active market IDs from this scan
 
         try:
-            import asyncio
-            tasks = []
-            for offset in range(0, self._pages * 100, 100):
-                tasks.append(self.client.get(f"{GAMMA_API}/markets", params={
-                    "active": "true", "closed": "false",
-                    "order": "volume24hr", "ascending": "false",
-                    "limit": 100, "offset": offset,
-                }))
-            responses = await asyncio.gather(*tasks, return_exceptions=True)
+            from datetime import datetime, timezone, timedelta
 
-            all_markets = []
-            for r in responses:
-                if isinstance(r, Exception):
-                    continue
-                batch = r.json() or []
-                all_markets.extend(batch)
+            # Single request with API-level date filter — no pagination needed.
+            # end_date_max eliminates ~90% of markets before transfer.
+            # limit=500 covers all vol≥MIN_VOLUME markets within MAX_DAYS_LEFT
+            # (empirically ~160 today; 500 leaves 3x headroom as Polymarket grows).
+            end_cutoff = (datetime.now(timezone.utc) + timedelta(days=max_days)).strftime("%Y-%m-%d")
+
+            r = await self.client.get(f"{GAMMA_API}/markets", params={
+                "active": "true", "closed": "false",
+                "order": "volume24hr", "ascending": "false",
+                "limit": 500,
+                "end_date_max": end_cutoff,
+            })
+            all_markets = r.json() if r.status_code == 200 else []
+            if not isinstance(all_markets, list):
+                all_markets = []
 
             # Track all active market IDs for stale position detection
             self._scanned_market_ids = {str(m["id"]) for m in all_markets}

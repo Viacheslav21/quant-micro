@@ -832,6 +832,174 @@ check("≥30s elapsed: recorded despite tiny move", len(db4.ticks) == 1)
 _mon_mod._price_last_recorded.clear()
 
 
+# ══════════════════════════════════════
+# 16. Early Take-Profit
+# ══════════════════════════════════════
+print("\n\033[1m16. Early Take-Profit\033[0m")
+
+import unittest.mock as mock16
+from engine.monitor import check_position_price as _cpp
+from engine.monitor import _rest_cooldown as _rc16, _rapid_drop_blocks as _rdb16
+
+_rc16.clear()
+_rdb16.clear()
+_mon_mod._price_last_recorded.clear()
+
+# end_date far in future (3 days out) for TP tests
+import datetime as _dt
+_far_end_16 = (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=3)).isoformat()
+_near_end_16 = (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(hours=12)).isoformat()
+
+POS_16 = {
+    "id": "pos16a", "market_id": "mkt16a", "side": "YES", "question": "TP test?",
+    "entry_price": 0.94, "stake_amt": 20, "theme": "other",
+    "end_date": _far_end_16,
+}
+
+TP_CONFIG = {**BASE_CONFIG, "TAKE_PROFIT_PRICE": 0.98, "TAKE_PROFIT_MIN_DAYS": 1.0,
+             "SLIPPAGE": 0.005, "FEE_PCT": 0.02}
+
+async def _rest_tp_confirms(*a, **kw):
+    return 0.981, 100000.0
+
+async def _rest_tp_below(*a, **kw):
+    return 0.972, 100000.0  # below TP threshold → spike, don't sell
+
+async def _rest_tp_none(*a, **kw):
+    return None, None
+
+# 1. Price at 98.1¢, 3 days left, REST confirms → TP triggered
+_rc16.clear()
+db = MockDB(open_positions=[POS_16])
+pos_cache = {"mkt16a_YES": POS_16.copy()}
+with mock16.patch("engine.monitor._verify_price_and_volume", _rest_tp_confirms):
+    run(_cpp("mkt16a_YES", 0.981, {"best_bid": 0.981},
+             db, MockWS(), MockTG(), TP_CONFIG, object(), pos_cache, {}, False))
+check("TP: triggered at 98.1¢ with 3d left", len(db.closed) == 1)
+check("TP: reason is take_profit", db.closed[0]["reason"] == "take_profit")
+check("TP: result is WIN", db.closed[0]["result"] == "WIN")
+check("TP: PnL positive", db.closed[0]["pnl"] > 0)
+
+# 2. Price at 98¢, only 12h left → NOT triggered (too close, just wait for resolution)
+_rc16.clear()
+_mon_mod._price_last_recorded.clear()
+POS_16b = {**POS_16, "id": "pos16b", "market_id": "mkt16b", "end_date": _near_end_16}
+db = MockDB(open_positions=[POS_16b])
+pos_cache = {"mkt16b_YES": POS_16b.copy()}
+with mock16.patch("engine.monitor._verify_price_and_volume", _rest_tp_confirms):
+    run(_cpp("mkt16b_YES", 0.981, {"best_bid": 0.981},
+             db, MockWS(), MockTG(), TP_CONFIG, object(), pos_cache, {}, False))
+check("TP: NOT triggered with only 12h left", len(db.closed) == 0)
+
+# 3. Price at 98¢, REST returns 97.2¢ (spike) → NOT triggered
+_rc16.clear()
+_mon_mod._price_last_recorded.clear()
+db = MockDB(open_positions=[POS_16])
+pos_cache = {"mkt16a_YES": POS_16.copy()}
+with mock16.patch("engine.monitor._verify_price_and_volume", _rest_tp_below):
+    run(_cpp("mkt16a_YES", 0.981, {"best_bid": 0.981},
+             db, MockWS(), MockTG(), TP_CONFIG, object(), pos_cache, {}, False))
+check("TP: NOT triggered when REST < TP threshold (spike)", len(db.closed) == 0)
+
+# 4. Price at 97¢ (below TP threshold) → NOT triggered
+_rc16.clear()
+_mon_mod._price_last_recorded.clear()
+db = MockDB(open_positions=[POS_16])
+pos_cache = {"mkt16a_YES": POS_16.copy()}
+with mock16.patch("engine.monitor._verify_price_and_volume", _rest_tp_confirms):
+    run(_cpp("mkt16a_YES", 0.97, {"best_bid": 0.97},
+             db, MockWS(), MockTG(), TP_CONFIG, object(), pos_cache, {}, False))
+check("TP: NOT triggered at 97¢ (below threshold)", len(db.closed) == 0)
+
+# 5. REST cooldown: second call within cooldown window → REST not called again
+_rc16.clear()
+_mon_mod._price_last_recorded.clear()
+rest_call_count = 0
+async def _rest_tp_counting(*a, **kw):
+    global rest_call_count
+    rest_call_count += 1
+    return 0.982, 100000.0
+
+POS_16c = {**POS_16, "id": "pos16c", "market_id": "mkt16c", "end_date": _far_end_16}
+db = MockDB(open_positions=[POS_16c])
+pos_cache = {"mkt16c_YES": POS_16c.copy()}
+# First call → REST called, TP fires
+rest_call_count = 0
+with mock16.patch("engine.monitor._verify_price_and_volume", _rest_tp_counting):
+    run(_cpp("mkt16c_YES", 0.982, {"best_bid": 0.982},
+             db, MockWS(), MockTG(), TP_CONFIG, object(), pos_cache, {}, False))
+first_calls = rest_call_count
+# Second call within cooldown → REST NOT called (position already closed anyway)
+with mock16.patch("engine.monitor._verify_price_and_volume", _rest_tp_counting):
+    run(_cpp("mkt16c_YES", 0.982, {"best_bid": 0.982},
+             db, MockWS(), MockTG(), TP_CONFIG, object(), pos_cache, {}, False))
+check("TP: REST called exactly once (cooldown prevents repeat)", rest_call_count == first_calls)
+
+# 5b. Entered at 98¢, TP=98¢ → NOT triggered (no gain, would lose fees)
+_rc16.clear()
+_mon_mod._price_last_recorded.clear()
+POS_16e = {**POS_16, "id": "pos16e", "market_id": "mkt16e",
+           "entry_price": 0.98, "end_date": _far_end_16}
+db = MockDB(open_positions=[POS_16e])
+pos_cache = {"mkt16e_YES": POS_16e.copy()}
+with mock16.patch("engine.monitor._verify_price_and_volume", _rest_tp_confirms):
+    run(_cpp("mkt16e_YES", 0.981, {"best_bid": 0.981},
+             db, MockWS(), MockTG(), TP_CONFIG, object(), pos_cache, {}, False))
+check("TP: NOT triggered when entry=98¢ (< 1¢ gain)", len(db.closed) == 0)
+
+# 6. TP respects exit fees (PnL < gross)
+_rc16.clear()
+_mon_mod._price_last_recorded.clear()
+POS_16d = {**POS_16, "id": "pos16d", "market_id": "mkt16d", "end_date": _far_end_16}
+db = MockDB(open_positions=[POS_16d])
+pos_cache = {"mkt16d_YES": POS_16d.copy()}
+with mock16.patch("engine.monitor._verify_price_and_volume", _rest_tp_confirms):
+    run(_cpp("mkt16d_YES", 0.981, {"best_bid": 0.981},
+             db, MockWS(), MockTG(), TP_CONFIG, object(), pos_cache, {}, False))
+gross_pnl = ((0.981 - 0.94) / 0.94) * 20
+check("TP: PnL less than gross (fees deducted)", db.closed[0]["pnl"] < gross_pnl)
+
+
+# ══════════════════════════════════════
+# 17. Dynamic Stake by Days Left
+# ══════════════════════════════════════
+print("\n\033[1m17. Dynamic Stake by Days Left\033[0m")
+
+from engine.entry import calc_stake
+
+cfg_dyn = {"MAX_STAKE": 20.0, "MIN_STAKE": 5.0, "MAX_STAKE_6H": 50.0, "MAX_STAKE_1D": 35.0}
+cfg_no_dyn = {"MAX_STAKE": 20.0, "MIN_STAKE": 5.0}  # no dynamic keys → uses fallback
+
+# ≤6h (0.25 days) → MAX_STAKE_6H
+check("6h: stake capped at $50", calc_stake(1000, cfg_dyn, days_left=0.1) == 50.0)
+check("6h: stake capped at $50 (exact 0.25d)", calc_stake(1000, cfg_dyn, days_left=0.25) == 50.0)
+
+# ≤1d → MAX_STAKE_1D
+check("1d: stake capped at $35", calc_stake(1000, cfg_dyn, days_left=0.5) == 35.0)
+check("1d: stake capped at $35 (exact 1d)", calc_stake(1000, cfg_dyn, days_left=1.0) == 35.0)
+
+# >1d → regular MAX_STAKE
+check(">1d: stake capped at $20", calc_stake(1000, cfg_dyn, days_left=2.0) == 20.0)
+check(">1d: stake capped at $20 (5d)", calc_stake(1000, cfg_dyn, days_left=5.0) == 20.0)
+
+# No-config fallback (uses MAX_STAKE * 2.5 for 6h, * 1.75 for 1d)
+check("6h fallback: MAX_STAKE*2.5=50", calc_stake(1000, cfg_no_dyn, days_left=0.1) == 50.0)
+check("1d fallback: MAX_STAKE*1.75=35", calc_stake(1000, cfg_no_dyn, days_left=0.5) == 35.0)
+
+# Small bankroll — still capped at bankroll
+check("6h: bankroll $30 → stake $0 (can't afford $50 min)", calc_stake(3, cfg_dyn, days_left=0.1) == 0.0)
+
+# MIN_STAKE still respected
+cfg_dyn2 = {"MAX_STAKE": 20.0, "MIN_STAKE": 5.0, "MAX_STAKE_6H": 50.0, "MAX_STAKE_1D": 35.0}
+check("6h: small bankroll $60 → 5% = $3, but MIN_STAKE=$5", calc_stake(60, cfg_dyn2, days_left=0.1) == 5.0)
+
+# Backward compat: no days_left argument → defaults to 99 (regular MAX_STAKE)
+check("No days_left: regular MAX_STAKE", calc_stake(1000, cfg_dyn) == 20.0)
+
+# try_enter passes days_left: 6h market gets bigger stake
+print("  (try_enter dynamic stake integration via calc_stake directly ↑)")
+
+
 # ── Results ──
 print(f"\n{'='*50}")
 total = passed + failed

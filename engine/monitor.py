@@ -154,6 +154,8 @@ async def check_position_price(ws_key: str, price: float, info: dict,
                     pos_cache=pos_cache, pos_last_db_write=pos_last_db_write,
                     exit_price=bid_price)
 
+    days_to_expiry = calc_days_left(pos.get("end_date"))
+
     # ── Resolution: ≤1¢ (LOSS) ──
     if bid_price <= 0.01:
         pnl = -stake
@@ -173,6 +175,33 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             msg += f"\n⏱ Держали: {hold_hours:.0f}ч | 💼 Банк: ${stats_now.get('bankroll', 0):.0f}"
             await tg.send(msg)
         return
+
+    # ── Early Take-Profit ──
+    # When price rises to TP threshold with meaningful time remaining, sell now
+    # instead of waiting for resolution. Frees capital for faster redeployment.
+    # REST-verified to avoid selling on a transient order book spike.
+    tp_price = config.get("TAKE_PROFIT_PRICE", 0.98)
+    tp_min_days = config.get("TAKE_PROFIT_MIN_DAYS", 1.0)
+    # Minimum gain above entry: avoids TP-ing positions entered near the TP threshold.
+    # e.g. entered at 98¢ with TP=98¢ → would close flat (minus fees). Skip it.
+    tp_min_gain = 0.01  # must be ≥1¢ above entry_price before TP fires
+    if (bid_price >= tp_price
+            and bid_price >= entry_price + tp_min_gain
+            and days_to_expiry > tp_min_days):
+        tp_cd_key = f"tp_{market_id}"
+        if now_ts - _rest_cooldown.get(tp_cd_key, 0) >= _REST_COOLDOWN_SEC:
+            _rest_cooldown[tp_cd_key] = now_ts
+            rest_price, _ = await _verify_price_and_volume(http_client, market_id, side)
+            if rest_price is not None and rest_price >= tp_price and rest_price >= entry_price + tp_min_gain:
+                pnl = ((rest_price - entry_price) / entry_price) * stake - calc_exit_fee(stake, entry_price, config)
+                if await _do_close(pos, pnl, "WIN", "take_profit",
+                                   **{**close_kw, "exit_price": rest_price}):
+                    hold_hours = hours_since(pos, "opened_at")
+                    log.info(f"[TP] {side} '{pos['question'][:40]}' PnL: +${pnl:.2f} @ {rest_price:.4f} ({days_to_expiry:.1f}d left)")
+                    msg = _tg_base(pos, rest_price, pnl, "💰 <b>TAKE PROFIT</b>")
+                    msg += f"\n⏱ До expiry: {days_to_expiry:.1f}d | Держали: {hold_hours:.0f}ч"
+                    await tg.send(msg)
+                return
 
     # ── Hard max loss cap — ALWAYS enforced ──
     max_loss = config["MAX_LOSS_PER_POS"]
@@ -195,7 +224,6 @@ async def check_position_price(ws_key: str, price: float, info: dict,
     # ── Rapid Drop (only protection besides MAX_LOSS) ──
     # Percentage SL disabled — fights the resolution harvesting strategy.
     # MAX_LOSS ($3 hard cap) + rapid drop (absolute ¢ threshold) are sufficient.
-    days_to_expiry = calc_days_left(pos.get("end_date"))
     rapid_drop_abs = config.get("RAPID_DROP_PCT", 0.07)
 
     if bid_price >= entry_price - rapid_drop_abs:
@@ -268,15 +296,24 @@ async def rest_poll_stale_positions(open_positions: list,
         return
 
     log.info(f"[REST POLL] {len(stale)} stale positions (WS silent ≥{_WS_STALE_SEC}s)")
-    for ws_key, pos in stale:
-        market_id, side = pos["market_id"], pos["side"]
-        rest_price, _ = await _verify_price_and_volume(http_client, market_id, side)
-        if rest_price is None:
+
+    # Fetch all stale prices in parallel — then process sequentially to avoid
+    # race conditions on shared pos_cache / ws.prices state.
+    import asyncio as _asyncio
+    prices = await _asyncio.gather(*[
+        _verify_price_and_volume(http_client, pos["market_id"], pos["side"])
+        for _, pos in stale
+    ], return_exceptions=True)
+
+    for (ws_key, pos), result in zip(stale, prices):
+        if isinstance(result, Exception) or result[0] is None:
             continue
+        rest_price, _ = result
+        market_id, side = pos["market_id"], pos["side"]
         # Record to price history so we can see the gap
         await db.record_price_tick(market_id, side, rest_price, "rest_poll")
         log.debug(f"[REST POLL] {ws_key} price={rest_price:.4f}")
-        # Inject into WS info so check_position_price uses REST price
+        # Inject into WS state so check_position_price uses REST price
         if ws_key not in ws.prices:
             ws.prices[ws_key] = {}
         ws.prices[ws_key]["best_bid"] = rest_price

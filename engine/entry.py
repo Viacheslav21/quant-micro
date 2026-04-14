@@ -11,11 +11,33 @@ from utils.telegram import TelegramBot
 
 log = logging.getLogger("micro")
 
+# In-memory watchlist cache: ws_key → watchlist row.
+# Populated by update_watchlist_cache() after each upsert_watchlist_batch().
+# Eliminates 1 DB query per WS price tick (100s of queries/min at scale).
+_wl_cache: dict = {}
 
-def calc_stake(bankroll: float, config: dict) -> float:
-    """Stake = min(MAX_STAKE, 5% of bankroll), but at least MIN_STAKE if bankroll allows."""
+
+def update_watchlist_cache(items: list):
+    """Refresh in-memory watchlist cache from latest batch upsert."""
+    for item in items:
+        ws_key = f"{item['market_id']}_{item.get('side', 'YES')}"
+        _wl_cache[ws_key] = item
+
+
+def calc_stake(bankroll: float, config: dict, days_left: float = 99) -> float:
+    """Stake = 5% of bankroll, capped by MAX_STAKE.
+    Near-expiry markets get a higher cap: ≤6h→MAX_STAKE_6H, ≤1d→MAX_STAKE_1D.
+    Rationale: shorter time = lower risk of adverse move = Kelly says bet more."""
     pct_stake = bankroll * 0.05
-    stake = min(config["MAX_STAKE"], max(pct_stake, config["MIN_STAKE"]))
+
+    if days_left <= 0.25:
+        max_s = config.get("MAX_STAKE_6H", config["MAX_STAKE"] * 2.5)
+    elif days_left <= 1.0:
+        max_s = config.get("MAX_STAKE_1D", config["MAX_STAKE"] * 1.75)
+    else:
+        max_s = config["MAX_STAKE"]
+
+    stake = min(max_s, max(pct_stake, config["MIN_STAKE"]))
     if stake > bankroll:
         return 0.0
     return round(stake, 2)
@@ -26,8 +48,9 @@ _last_stake_warn = 0.0
 
 async def try_enter(candidate: dict, db: Database, ws: MicroWS,
                     tg: TelegramBot, config: dict, pos_cache: dict = None,
-                    source: str = "scan"):
-    """Try to enter a position. Returns True if entered, or reason string if rejected."""
+                    source: str = "scan", open_positions: list = None):
+    """Try to enter a position. Returns True if entered, or reason string if rejected.
+    Pass open_positions to avoid a DB round-trip (use the scan-cycle's cached list)."""
     global _last_stake_warn
 
     market_id = candidate["market_id"]
@@ -42,7 +65,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     if not entry_check["allowed"]:
         return entry_check["reason"]
 
-    open_pos = await db.get_open_positions()
+    open_pos = open_positions if open_positions is not None else await db.get_open_positions()
     if len(open_pos) >= config["MAX_OPEN"]:
         return "max_open"
 
@@ -52,9 +75,11 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         if theme_count >= config["MAX_PER_THEME"]:
             return "theme_limit"
 
+    days_left = candidate.get("days_left", 99)
+
     stats = await db.get_stats(config["BANKROLL"])
     bankroll = stats.get("bankroll", config["BANKROLL"])
-    stake = calc_stake(bankroll, config)
+    stake = calc_stake(bankroll, config, days_left=days_left)
 
     if stake < config["MIN_STAKE"]:
         now = time.time()
@@ -73,7 +98,6 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         return "low_roi"
 
     quality = candidate.get("quality", 0)
-    days_left = candidate.get("days_left", 0)
     # Dynamic quality threshold: far markets need higher quality
     base_q = config["MIN_QUALITY_SCORE"]
     if days_left <= 1:
@@ -164,7 +188,7 @@ async def check_watchlist_price(ws_key: str, price: float, info: dict,
     if spread > config["MAX_SPREAD"]:
         return
 
-    wl = await db.get_watchlist_market(market_id, side)
+    wl = _wl_cache.get(ws_key) or await db.get_watchlist_market(market_id, side)
     if not wl:
         return
 
