@@ -24,13 +24,18 @@ def update_watchlist_cache(items: list):
         _wl_cache[ws_key] = item
 
 
-def calc_stake(bankroll: float, config: dict, days_left: float = 99) -> float:
+def calc_stake(bankroll: float, config: dict, days_left: float = 99,
+               theme: str = "") -> float:
     """Stake = 5% of bankroll, capped by MAX_STAKE.
     Near-expiry markets get a higher cap: ≤6h→MAX_STAKE_6H, ≤1d→MAX_STAKE_1D.
-    Rationale: shorter time = lower risk of adverse move = Kelly says bet more."""
+    Rationale: shorter time = lower risk of adverse move = Kelly says bet more.
+    Exception: esports — live matches can resolve 95¢→0¢ in minutes regardless
+    of time-to-expiry. Dynamic stake uplift does NOT apply; use MAX_STAKE only."""
     pct_stake = bankroll * 0.05
 
-    if days_left <= 0.25:
+    if theme == "esports":
+        max_s = config["MAX_STAKE"]
+    elif days_left <= 0.25:
         max_s = config.get("MAX_STAKE_6H", config["MAX_STAKE"] * 2.5)
     elif days_left <= 1.0:
         max_s = config.get("MAX_STAKE_1D", config["MAX_STAKE"] * 1.75)
@@ -79,7 +84,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
 
     stats = await db.get_stats(config["BANKROLL"])
     bankroll = stats.get("bankroll", config["BANKROLL"])
-    stake = calc_stake(bankroll, config, days_left=days_left)
+    stake = calc_stake(bankroll, config, days_left=days_left, theme=theme)
 
     if stake < config["MIN_STAKE"]:
         now = time.time()

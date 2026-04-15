@@ -996,6 +996,13 @@ check("6h: small bankroll $60 → 5% = $3, but MIN_STAKE=$5", calc_stake(60, cfg
 # Backward compat: no days_left argument → defaults to 99 (regular MAX_STAKE)
 check("No days_left: regular MAX_STAKE", calc_stake(1000, cfg_dyn) == 20.0)
 
+# Esports exception: dynamic uplift does NOT apply — live BO3 matches can resolve
+# 95c→0c in minutes, so "shorter time = higher certainty" logic doesn't hold.
+check("esports 6h: capped at MAX_STAKE not MAX_STAKE_6H", calc_stake(1000, cfg_dyn, days_left=0.1, theme="esports") == 20.0)
+check("esports 1d: capped at MAX_STAKE not MAX_STAKE_1D", calc_stake(1000, cfg_dyn, days_left=0.5, theme="esports") == 20.0)
+check("esports >1d: still MAX_STAKE", calc_stake(1000, cfg_dyn, days_left=3.0, theme="esports") == 20.0)
+check("non-esports 6h: still gets MAX_STAKE_6H", calc_stake(1000, cfg_dyn, days_left=0.1, theme="crypto") == 50.0)
+
 # try_enter passes days_left: 6h market gets bigger stake
 print("  (try_enter dynamic stake integration via calc_stake directly ↑)")
 
