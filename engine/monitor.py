@@ -22,6 +22,10 @@ _REST_COOLDOWN_SEC = 60
 # during fast moves (e.g. BTC approaching a price target).
 _rapid_drop_blocks: dict = {}  # ws_key → int
 
+# Max loss block counter: same logic for MAX_LOSS. REST can lag for 25+ min on thin markets.
+# After 5 consecutive REST blocks, trust WS bid directly.
+_max_loss_blocks: dict = {}  # ws_key → int
+
 # Price history throttle: record tick only when price moves ≥0.3¢ or ≥30s since last record
 _price_last_recorded: dict = {}  # ws_key → (price, timestamp)
 _PRICE_RECORD_MIN_CHANGE = 0.003   # 0.3¢
@@ -38,6 +42,8 @@ def cleanup_stale_cooldowns():
     # We don't have a timestamp here so just cap at a safe size
     if len(_rapid_drop_blocks) > 200:
         _rapid_drop_blocks.clear()
+    if len(_max_loss_blocks) > 200:
+        _max_loss_blocks.clear()
 
 
 @retry(stop=stop_after_attempt(2), wait=wait_fixed(1),
@@ -82,6 +88,7 @@ async def _do_close(pos, pnl, result, reason, ws_key,
         pos_last_db_write.pop(p.get("id"), None)
     _price_last_recorded.pop(ws_key, None)
     _rapid_drop_blocks.pop(ws_key, None)
+    _max_loss_blocks.pop(ws_key, None)
     await db.recalibrate_theme(pos.get("theme", "other"))
     return True
 
@@ -182,9 +189,9 @@ async def check_position_price(ws_key: str, price: float, info: dict,
     # REST-verified to avoid selling on a transient order book spike.
     tp_price = config.get("TAKE_PROFIT_PRICE", 0.98)
     tp_min_days = config.get("TAKE_PROFIT_MIN_DAYS", 1.0)
-    # Minimum gain above entry: avoids TP-ing positions entered near the TP threshold.
-    # e.g. entered at 98¢ with TP=98¢ → would close flat (minus fees). Skip it.
-    tp_min_gain = 0.01  # must be ≥1¢ above entry_price before TP fires
+    # Minimum gain above entry: must exceed fees to be profitable.
+    # Break-even: SLIPPAGE + FEE_PCT * entry_price. Add 0.5¢ margin.
+    tp_min_gain = config.get("SLIPPAGE", 0) + config.get("FEE_PCT", 0) * entry_price + 0.005
     if (bid_price >= tp_price
             and bid_price >= entry_price + tp_min_gain
             and days_to_expiry > tp_min_days):
@@ -206,13 +213,21 @@ async def check_position_price(ws_key: str, price: float, info: dict,
     # ── Hard max loss cap — ALWAYS enforced ──
     max_loss = config["MAX_LOSS_PER_POS"]
     if pnl_dollar <= -max_loss:
-        rest_price, _ = await _verify_price_and_volume(http_client, market_id, side)
-        if rest_price is not None:
-            rest_pnl = ((rest_price - entry_price) / entry_price) * stake
-            if rest_pnl > -max_loss:
-                log.info(f"[MAX LOSS BLOCKED] {market_id[:8]} WS loss=${pnl_dollar:.2f} but REST=${rest_pnl:.2f} — not real")
-                return
-            pnl_dollar = rest_pnl
+        ml_blocks = _max_loss_blocks.get(ws_key, 0)
+        if ml_blocks >= 5:
+            # REST has blocked 5 consecutive times — trust WS bid directly
+            log.info(f"[MAX LOSS] Bypassing REST after {ml_blocks} blocks — trusting WS bid={bid_price:.4f}")
+            pnl_dollar = ((bid_price - entry_price) / entry_price) * stake
+        else:
+            rest_price, _ = await _verify_price_and_volume(http_client, market_id, side)
+            if rest_price is not None:
+                rest_pnl = ((rest_price - entry_price) / entry_price) * stake
+                if rest_pnl > -max_loss:
+                    _max_loss_blocks[ws_key] = ml_blocks + 1
+                    log.info(f"[MAX LOSS BLOCKED] {market_id[:8]} WS loss=${pnl_dollar:.2f} but REST=${rest_pnl:.2f} — not real (block #{ml_blocks+1})")
+                    return
+                pnl_dollar = rest_pnl
+        _max_loss_blocks.pop(ws_key, None)  # reset on close
         pnl = pnl_dollar - calc_exit_fee(stake, entry_price, config)
         if await _do_close(pos, pnl, "LOSS", "max_loss", **close_kw):
             log.info(f"[MAX LOSS] {side} '{pos['question'][:40]}' loss=${pnl:.2f} > cap ${max_loss}")
