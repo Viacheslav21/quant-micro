@@ -77,6 +77,11 @@ THEME_KEYWORDS = {
                    "verstappen","hamilton","leclerc","norris",
                    "mcilroy","koepka","rahm","hovland","morikawa",
                    "hojgaard","fleetwood","lowry","macintyre","henley","thomas",
+                   # Chess
+                   "fide","chess","candidates tournament","world chess",
+                   "anish giri","magnus carlsen","hikaru nakamura","fabiano caruana",
+                   "ding liren","gukesh","nepomniachtchi","praggnanandhaa","firouzja",
+                   "wei yi","vidit","arjun erigaisi",
                    ],
     "esports":    ["esports","counter-strike","dota","league of legends","valorant",
                    "overwatch","call of duty","fortnite","apex legends","rocket league",
@@ -132,12 +137,15 @@ THEME_KEYWORDS = {
     # Tech & science
     "tech":       [" ai ","artificial intelligence","openai","anthropic","google","apple","nvidia",
                    "tesla","microsoft","meta","amazon","semiconductor","chip","quantum","robotics",
-                   "chatgpt","gemini","claude","deepseek"],
+                   "chatgpt","gemini","claude","deepseek",
+                   "gpt-","gpt4","gpt5","gpt 4","gpt 5","o3 ","o4 ","o1 ",
+                   "llama","mistral","grok","perplexity","xai"],
     "space":      ["nasa","spacex","rocket launch","satellite","mars landing","moon landing",
                    "orbit","starship","blue origin","artemis","space station","space launch"],
     "musk":       ["elon musk","musk","tweet","twitter","x.com"],
     "social":     ["followers","tiktok","instagram","youtube","subscribers","views","downloads",
-                   "mrbeast","mr beast","streamer","influencer","viral"],
+                   "mrbeast","mr beast","streamer","influencer","viral",
+                   "barstool","onlyfans","twitch","podcast","dave portnoy"],
 
     # Society
     "health":     ["covid","pandemic","vaccine","fda","who ","disease","outbreak",
