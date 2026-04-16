@@ -134,11 +134,24 @@ THEME_KEYWORDS = {
     "economy":    ["gdp","inflation","recession","unemployment","cpi","jobs","nonfarm","payroll",
                    "consumer spending","retail sales","housing","mortgage","trade balance"],
 
+    # AI model releases — separate from general tech, block this specifically.
+    # These markets are high-risk: model can drop from 95¢ to 0 in minutes on surprise launch.
+    "ai_release": ["gpt-4","gpt-5","gpt-6","gpt4","gpt5","gpt 4","gpt 5","gpt-4o","gpt-5o",
+                   "o3 ","o4 ","o5 ","o1 ","o3-","o4-",
+                   "claude 4","claude 5","claude 3.7","claude 3.5","claude 4.","claude 5.",
+                   "gemini 2","gemini ultra","gemini pro","gemini flash",
+                   "llama 4","llama 5","llama4","llama5",
+                   "grok 3","grok 4","grok3","grok4",
+                   "deepseek r2","deepseek r3","deepseek v3","deepseek v4",
+                   "mistral large","mistral medium","mistral next",
+                   "released by april","released by may","released by march",
+                   "launch by april","launch by may",
+                   ],
+
     # Tech & science
     "tech":       [" ai ","artificial intelligence","openai","anthropic","google","apple","nvidia",
                    "tesla","microsoft","meta","amazon","semiconductor","chip","quantum","robotics",
                    "chatgpt","gemini","claude","deepseek",
-                   "gpt-","gpt4","gpt5","gpt 4","gpt 5","o3 ","o4 ","o1 ",
                    "llama","mistral","grok","perplexity","xai"],
     "space":      ["nasa","spacex","rocket launch","satellite","mars landing","moon landing",
                    "orbit","starship","blue origin","artemis","space station","space launch"],
