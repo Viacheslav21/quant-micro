@@ -299,6 +299,21 @@ def classify_theme(question: str) -> str:
     return "other"
 
 
+_TARGET_WR = 0.93   # system baseline — used for theme quality adjustment
+_ADJ_FACTOR_MIN = 0.75  # floor: never slash quality below 75% (unknown themes)
+_ADJ_FACTOR_MAX = 1.05  # ceiling: slight boost for top themes only
+
+
+def theme_quality_factor(theme: str, theme_wr: dict) -> float:
+    """Bayesian adjustment factor for quality score based on theme's historical WR.
+    Returns 1.0 (no adjustment) if theme has no data yet.
+    Example: crypto adj_wr=0.81 → factor=0.87 → Q70 becomes Q61."""
+    adj_wr = theme_wr.get(theme)
+    if adj_wr is None:
+        return 1.0
+    return max(_ADJ_FACTOR_MIN, min(_ADJ_FACTOR_MAX, adj_wr / _TARGET_WR))
+
+
 def quality_score(price: float, spread: float, days_left: float,
                   volume: float, liquidity: float) -> float:
     """Score 0-100 for resolution harvesting.
@@ -382,6 +397,8 @@ class MicroScanner:
         self.client = httpx.AsyncClient(timeout=15.0)
         # Event cascade: negRiskMarketID → list of sibling market info
         self.event_siblings: dict[str, list[dict]] = {}
+        # Bayesian theme WR — updated each scan cycle from DB (1-cycle lag is fine)
+        self.theme_wr: dict[str, float] = {}
 
     async def fetch_candidates(self) -> tuple[list, list]:
         """Returns (direct_entries, watchlist).
@@ -530,10 +547,12 @@ class MicroScanner:
                 # Dynamic watchlist min: lower for near-expiry markets
                 dyn_wl = dynamic_entry_price(days_left, wl_min, self.config) - 0.04  # 4¢ buffer below entry
 
+                theme_factor = theme_quality_factor(theme, self.theme_wr)
+
                 if yes_price >= dyn_wl:
                     roi = (1.0 - yes_price) / yes_price
                     if roi >= min_roi:
-                        q = quality_score(yes_price, spread, days_left, vol, liq)
+                        q = round(quality_score(yes_price, spread, days_left, vol, liq) * theme_factor, 1)
                         if q >= min_quality:
                             candidates_for_market.append({
                                 "side": "YES",
@@ -548,7 +567,7 @@ class MicroScanner:
                 if no_price >= dyn_wl:
                     roi = (1.0 - no_price) / no_price
                     if roi >= min_roi:
-                        q = quality_score(no_price, spread, days_left, vol, liq)
+                        q = round(quality_score(no_price, spread, days_left, vol, liq) * theme_factor, 1)
                         if q >= min_quality:
                             best_bid_yes = float(m.get("bestBid") or yes_price)
                             no_best_ask = round(1.0 - best_bid_yes, 4)

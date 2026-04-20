@@ -187,6 +187,23 @@ check("Batch subscribe", "batch" in src_ws.lower() or "100" in src_ws)
 check("NO side price inversion", "1.0 -" in src_ws or "1 -" in src_ws)
 
 
+# ── 11. Theme Quality Adjustment ──
+print("\n\033[1m11. Theme Quality Adjustment\033[0m")
+
+check("theme_quality_factor function exists",    "def theme_quality_factor" in src_scanner)
+check("_TARGET_WR constant defined",             "_TARGET_WR" in src_scanner)
+check("_ADJ_FACTOR_MIN floor defined",           "_ADJ_FACTOR_MIN" in src_scanner)
+check("_ADJ_FACTOR_MAX ceiling defined",         "_ADJ_FACTOR_MAX" in src_scanner)
+check("theme_wr attr on MicroScanner",           "self.theme_wr" in src_scanner)
+check("theme_factor applied before quality gate","theme_factor" in src_scanner)
+check("get_theme_adj_wr in db.py",               "get_theme_adj_wr" in src_db)
+check("Bayesian shrinkage reused from DB",       "SHRINKAGE_K" in src_db and "get_theme_adj_wr" in src_db)
+check("scanner.theme_wr updated in main loop",   "scanner.theme_wr = theme_wr" in src_main)
+check("get_theme_adj_wr fetched in gather",      "get_theme_adj_wr" in src_main)
+check("factor clamped: max(min, min(max, ...))", "max(_ADJ_FACTOR_MIN" in src_scanner or "_ADJ_FACTOR_MIN, min" in src_scanner)
+check("neutral for unknown themes (factor 1.0)", "return 1.0" in src_scanner)
+
+
 # ── Results ──
 print(f"\n{'='*50}")
 total = passed + failed

@@ -1007,6 +1007,62 @@ check("non-esports 6h: still gets MAX_STAKE_6H", calc_stake(1000, cfg_dyn, days_
 print("  (try_enter dynamic stake integration via calc_stake directly ↑)")
 
 
+# ══════════════════════════════════════
+# 18. Theme Quality Adjustment
+# ══════════════════════════════════════
+print("\n\033[1m18. Theme Quality Adjustment\033[0m")
+
+from engine.scanner import theme_quality_factor, quality_score, _TARGET_WR, _ADJ_FACTOR_MIN, _ADJ_FACTOR_MAX
+
+# No data → neutral
+check("No theme_wr data → factor 1.0",       theme_quality_factor("crypto", {}) == 1.0)
+check("Unknown theme in dict → factor 1.0",  theme_quality_factor("unknown", {"crypto": 0.81}) == 1.0)
+
+# Formula: adj_wr / TARGET_WR, clamped
+crypto_factor = theme_quality_factor("crypto", {"crypto": 0.81})
+expected_crypto = max(_ADJ_FACTOR_MIN, min(_ADJ_FACTOR_MAX, 0.81 / _TARGET_WR))
+check("crypto 0.81 → factor = 0.81/TARGET_WR", abs(crypto_factor - expected_crypto) < 0.001)
+check("crypto factor < 1.0 (penalty)",         crypto_factor < 1.0)
+
+climate_factor = theme_quality_factor("climate", {"climate": 0.94})
+expected_climate = max(_ADJ_FACTOR_MIN, min(_ADJ_FACTOR_MAX, 0.94 / _TARGET_WR))
+check("climate 0.94 → factor ≈ 1.01",          abs(climate_factor - expected_climate) < 0.001)
+check("climate factor >= 1.0 (slight boost)",   climate_factor >= 1.0)
+
+# Floor and ceiling
+check("adj_wr=0.50 → clamped to MIN floor",    theme_quality_factor("bad", {"bad": 0.50}) == _ADJ_FACTOR_MIN)
+check("adj_wr=1.00 → clamped to MAX ceiling",  theme_quality_factor("top", {"top": 1.00}) == _ADJ_FACTOR_MAX)
+check("election 0.70 → 0.753 (above floor)",    abs(theme_quality_factor("election", {"election": 0.70}) - round(0.70 / _TARGET_WR, 3)) < 0.001)
+check("election 0.60 → hits floor 0.75",       theme_quality_factor("election", {"election": 0.60}) == _ADJ_FACTOR_MIN)
+
+# Applied: crypto Q70 goes down, climate Q70 stays up
+base_q = quality_score(0.95, 0.005, 0.5, 200_000, 10_000)
+crypto_adj  = round(base_q * theme_quality_factor("crypto",  {"crypto": 0.81}), 1)
+climate_adj = round(base_q * theme_quality_factor("climate", {"climate": 0.94}), 1)
+check("crypto adj_q < base_q",                 crypto_adj < base_q)
+check("climate adj_q >= base_q",               climate_adj >= base_q)
+
+# Key scenario: crypto Q70 at WR=0.81 → ~61, not blocked at MIN_Q=40 but lower priority
+crypto_adj_70 = round(70.0 * theme_quality_factor("crypto", {"crypto": 0.81}), 1)
+check("crypto Q70 → ~61 (above Q40 floor)",    40 < crypto_adj_70 < 70)
+
+# election at floor: Q70 → 70 * 0.75 = 52.5
+election_adj_70 = round(70.0 * _ADJ_FACTOR_MIN, 1)
+check("election Q70 @ floor → 52.5",           abs(election_adj_70 - 52.5) < 0.2)
+
+# Bayesian adj_wr math (mirrors db.get_theme_adj_wr formula)
+SHRINKAGE_K = 20
+n, wins, global_wr = 150, 122, 0.87   # crypto-like
+raw_wr = wins / n
+adj_wr = (n * raw_wr + SHRINKAGE_K * global_wr) / (n + SHRINKAGE_K)
+check("Bayesian adj_wr shrinks toward global", min(raw_wr, global_wr) <= adj_wr <= max(raw_wr, global_wr))
+
+n2, wins2 = 5, 5   # tiny theme, 100% WR
+raw_wr2 = wins2 / n2
+adj_wr2 = (n2 * raw_wr2 + SHRINKAGE_K * global_wr) / (n2 + SHRINKAGE_K)
+check("Small sample shrinks heavily toward global", adj_wr2 < raw_wr2)
+
+
 # ── Results ──
 print(f"\n{'='*50}")
 total = passed + failed

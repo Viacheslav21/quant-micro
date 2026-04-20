@@ -496,6 +496,31 @@ class Database:
             """)
             return [dict(r) for r in rows]
 
+    async def get_theme_adj_wr(self) -> dict:
+        """Bayesian adjusted WR per theme (same shrinkage as recalibrate_theme).
+        Returns {theme: adj_wr} only for themes with BLOCK_MIN_TRADES+ closed trades."""
+        async with self.pool.acquire() as conn:
+            g = await conn.fetchrow("""
+                SELECT COUNT(*) as n, SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) as wins
+                FROM micro_positions WHERE status='closed'
+            """)
+            global_wr = (g["wins"] or 0) / max(g["n"] or 1, 1)
+            rows = await conn.fetch("""
+                SELECT theme, COUNT(*) as n,
+                       SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) as wins
+                FROM micro_positions WHERE status='closed' AND theme IS NOT NULL
+                GROUP BY theme
+            """)
+            result = {}
+            for r in rows:
+                n = r["n"] or 0
+                if n < self.BLOCK_MIN_TRADES:
+                    continue
+                raw_wr = (r["wins"] or 0) / n
+                adj_wr = (n * raw_wr + self.SHRINKAGE_K * global_wr) / (n + self.SHRINKAGE_K)
+                result[r["theme"]] = round(adj_wr, 4)
+            return result
+
     async def get_daily_report(self, starting_bankroll: float = 500.0) -> dict:
         """Gather all data for daily telegram report in a single DB roundtrip."""
         async with self.pool.acquire() as conn:

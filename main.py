@@ -352,11 +352,13 @@ async def main():
         nonlocal scan_count
         global _peak_equity
 
-        # 1. Fetch candidates + open positions in parallel (independent queries)
-        (direct, watchlist), open_pos = await asyncio.gather(
+        # 1. Fetch candidates + open positions + theme WR in parallel
+        (direct, watchlist), open_pos, theme_wr = await asyncio.gather(
             scanner.fetch_candidates(),
             db.get_open_positions(),
+            db.get_theme_adj_wr(),
         )
+        scanner.theme_wr = theme_wr  # update for next cycle (1-cycle lag is fine)
 
         # 2. Check expired + disappeared positions (reuse open_pos — no extra DB query)
         await check_expired_positions(db, ws, tg, http_client, CONFIG,
