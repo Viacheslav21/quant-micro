@@ -10,7 +10,21 @@ log = logging.getLogger("micro.scanner")
 GAMMA_API = "https://gamma-api.polymarket.com"
 
 THEME_KEYWORDS = {
-    # Sports & esports FIRST — must match before "war" catches "strike" or generic " vs "
+    # Esports FIRST — must match before sports catches "world cup", "playoff", "masters" in tournament names
+    "esports":    ["esports","counter-strike","dota","league of legends","valorant",
+                   "overwatch","call of duty","fortnite","apex legends","rocket league",
+                   "fnatic","navi","faze","g2 esports","team liquid","vitality",
+                   "cloud9","t1 ","gen.g","sentinels","100 thieves",
+                   "blast open","pgl bucharest","pgl ","esl ","iem ",
+                   "parivision","fut esports","b8 vs","3dmax","fokus vs","wildcard",
+                   "astralis","bc.game","voca","mongolz",
+                   "(bo1)","(bo3)","(bo5)","bo1","bo3","bo5",
+                   "map winner","map 1 winner","map 2 winner","map 3 winner","map handicap",
+                   # LoL teams & patterns
+                   "lol:","lol ","top esports","jd gaming","nongshim","kiwoom","drx",
+                   "t1 vs","geng","hanwha","kt rolster","dplus","game 2 winner",
+                   "game 3 winner","game 1 winner"],
+    # Sports — after esports so tournament keywords don't steal esports markets
     "sports":     [
                    # Leagues
                    "nba","nfl ","mlb","nhl","mls","ufc","mma","wwe","pga","lpga",
@@ -35,7 +49,7 @@ THEME_KEYWORDS = {
                    "mexico city:","barletta:","madrid:","rome:","monte carlo:",
                    "indian wells:","miami open:","barcelona open",
                    # Match patterns (no " vs " here — _VS_PATTERN fallback catches it
-                   # after esports/other themes get a chance to match first)
+                   # after other themes get a chance to match first)
                    "spread:","o/u ","over/under","moneyline",
                    "total goals","total points","total runs","total sets",
                    "points scored","score ","goals ",
@@ -83,19 +97,6 @@ THEME_KEYWORDS = {
                    "ding liren","gukesh","nepomniachtchi","praggnanandhaa","firouzja",
                    "wei yi","vidit","arjun erigaisi",
                    ],
-    "esports":    ["esports","counter-strike","dota","league of legends","valorant",
-                   "overwatch","call of duty","fortnite","apex legends","rocket league",
-                   "fnatic","navi","faze","g2 esports","team liquid","vitality",
-                   "cloud9","t1 ","gen.g","sentinels","100 thieves",
-                   "blast open","pgl bucharest","pgl ","esl ","iem ","major ",
-                   "parivision","fut esports","b8 vs","3dmax","fokus vs","wildcard",
-                   "astralis","bc.game","voca","mongolz",
-                   "(bo1)","(bo3)","(bo5)","bo1","bo3","bo5",
-                   "map winner","map 1 winner","map 2 winner","map 3 winner","map handicap",
-                   # LoL teams & patterns
-                   "lol:","lol ","top esports","jd gaming","nongshim","kiwoom","drx",
-                   "t1 vs","geng","hanwha","kt rolster","dplus","game 2 winner",
-                   "game 3 winner","game 1 winner"],
 
     # Geopolitics & conflicts
     "iran":       ["iran","iranian","tehran","nuclear iran","iaea","persian gulf","strait of hormuz",
