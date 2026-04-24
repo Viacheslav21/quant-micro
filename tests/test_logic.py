@@ -153,9 +153,11 @@ check("Block: between temp range", is_binary_risk("Will temp be between 20°C an
 check("Block: between % range", is_binary_risk("Will inflation be between 2.5% and 3.0%?"))
 
 # Should ALLOW
-check("Allow: above $X", not is_binary_risk("Will Bitcoin be above $72,000?"))
 check("Allow: dip to $X", not is_binary_risk("Will Bitcoin dip to $64,000?"))
-check("Allow: reach $X", not is_binary_risk("Will Bitcoin reach $78,000?"))
+check("Block: crypto above $X", is_binary_risk("Will Bitcoin be above $72,000?"))
+check("Block: btc reach $X", is_binary_risk("Will Bitcoin reach $78,000?"))
+check("Block: eth above $X", is_binary_risk("Will Ethereum exceed $3,500?"))
+check("Block: end in a draw", is_binary_risk("Will the match end in a draw?"))
 check("Allow: more than X°C", not is_binary_risk("Will temp increase by more than 1.29°C?"))
 check("Allow: highest temp be X°C", not is_binary_risk("Will highest temp in Tokyo be 20°C?"))
 check("Allow: Musk tweets", not is_binary_risk("Will Elon Musk post 280-299 tweets?"))

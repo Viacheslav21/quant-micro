@@ -262,6 +262,9 @@ _BINARY_RISK_PATTERNS = [
     re.compile(r"between.*\d+%.*and.*\d+%", re.I),     # "between 2.5% and 3.0%" — rate range
     re.compile(r"game \d+ winner", re.I),               # "Game 2 Winner" — single live game, resolves in 15-40 min
     re.compile(r"map \d+ winner", re.I),                # "Map 2 Winner" — single CS/Valorant map, same risk
+    re.compile(r"end in a draw", re.I),                 # Soccer draw bet — binary (Win/Draw/Loss, no gradual price)
+    re.compile(r"(?:btc|bitcoin|eth(?:ereum)?|sol(?:ana)?|xrp).{0,20}(?:above|over|exceed|reach|hit|surpass).{0,10}\$[\d,.k]+", re.I),  # "BTC above $76k" — can flash-crash through level instantly
+    re.compile(r"(?:btc|bitcoin|eth(?:ereum)?|sol(?:ana)?|xrp).{0,20}(?:below|under|drop(?:s)?\s+to|fall\s+to).{0,10}\$[\d,.k]+", re.I),  # "BTC below $70k" — inverse of above
 ]
 
 
