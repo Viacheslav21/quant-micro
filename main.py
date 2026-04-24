@@ -377,6 +377,10 @@ async def main():
                                      open_positions=open_pos)
             if result is True:
                 entered += 1
+                # Keep open_pos in sync so subsequent candidates in this cycle
+                # see the correct MAX_OPEN and MAX_PER_THEME counts.
+                open_pos = open_pos + [{"theme": c.get("theme", "other"),
+                                        "market_id": c.get("market_id")}]
             elif isinstance(result, str):
                 _skip[result] = _skip.get(result, 0) + 1
                 theme = c.get("theme", "other")
@@ -436,7 +440,7 @@ async def main():
         # 8. Daily report (once per day, first scan after midnight UTC)
         await _send_daily_report(db, tg, CONFIG)
 
-        # 8. Cleanup stale WS (every 30 scans)
+        # 9. Cleanup stale WS (every 30 scans)
         if scan_count > 0 and scan_count % 30 == 0:
             await db.cleanup_watchlist()
             wl_data = await db.get_watchlist()
