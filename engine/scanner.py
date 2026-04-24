@@ -265,12 +265,25 @@ _BINARY_RISK_PATTERNS = [
 ]
 
 
+# Questions containing these substrings are always skipped (case-insensitive)
+BLOCKED_QUESTION_KEYWORDS = [
+    "hong kong",
+    "cape town",
+    "global temperature",
+]
+
+
 def is_binary_risk(question: str) -> bool:
     """Check if market can lose entire stake instantly (no gradual price decline).
     These markets resolve to 0 without intermediate prices for SL to catch.
     Includes per-game/per-map esports winner markets: a single live game resolves
     in 15-40 min and can flip from 95¢+ to $0 on a single upset."""
     return any(p.search(question) for p in _BINARY_RISK_PATTERNS)
+
+
+def is_blocked_question(question: str) -> bool:
+    q = question.lower()
+    return any(kw in q for kw in BLOCKED_QUESTION_KEYWORDS)
 
 
 def dynamic_entry_price(days_left: float, base_price: float, config: dict = None) -> float:
@@ -528,6 +541,10 @@ class MicroScanner:
 
                 # Skip binary risk markets (can lose entire stake instantly)
                 if is_binary_risk(question):
+                    continue
+
+                # Skip permanently blocked question keywords
+                if is_blocked_question(question):
                     continue
 
                 spread = float(m.get("spread") or 0)

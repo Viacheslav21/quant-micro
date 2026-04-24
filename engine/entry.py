@@ -4,7 +4,7 @@ import time
 import logging
 
 from engine.shared import calc_days_left
-from engine.scanner import dynamic_entry_price
+from engine.scanner import dynamic_entry_price, is_blocked_question
 from engine.ws_client import MicroWS
 from utils.db import Database
 from utils.telegram import TelegramBot
@@ -63,6 +63,10 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     question = candidate.get("question", "")
     theme = candidate.get("theme", "other")
     neg_risk_id = candidate.get("neg_risk_id")
+
+    # Blocked question keywords (city/pattern blacklist)
+    if is_blocked_question(question):
+        return "blocked_question"
 
     # Combined entry check: duplicate, theme block, SL blacklist, cooldown, negRisk group
     entry_check = await db.check_entry_allowed(market_id, side, theme, neg_risk_id=neg_risk_id,
