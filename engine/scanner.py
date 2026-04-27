@@ -441,6 +441,13 @@ class MicroScanner:
         no_date_samples: list[tuple[float, str, str]] = []
         self._scanned_market_ids = set()  # all active market IDs from this scan
 
+        rej = {
+            "volume": 0, "liquidity": 0, "price_range": 0,
+            "date": 0, "too_far": 0, "binary_risk": 0,
+            "blocked": 0, "spread": 0, "no_orders": 0,
+            "roi": 0, "quality": 0,
+        }
+
         try:
             from datetime import datetime, timezone, timedelta
 
@@ -499,9 +506,11 @@ class MicroScanner:
             for m in all_markets:
                 vol = float(m.get("volume") or 0)
                 if vol < min_volume:
+                    rej["volume"] += 1
                     continue
                 liq = float(m.get("liquidity") or 0)
                 if liq < min_liquidity:
+                    rej["liquidity"] += 1
                     continue
 
                 raw_prices = m.get("outcomePrices")
@@ -516,8 +525,10 @@ class MicroScanner:
                 # Floor 0.86 (90¢ entry - 4¢ buffer), ceiling 0.98 (ROI too low after costs)
                 early_min = min(wl_min, 0.86)
                 if yes_price < early_min and no_price < early_min:
+                    rej["price_range"] += 1
                     continue
                 if yes_price > 0.98 and no_price > 0.98:
+                    rej["price_range"] += 1
                     continue
 
                 # Get days_left: API endDate first, then parse from question
@@ -535,27 +546,33 @@ class MicroScanner:
 
                 if days_left < 0:
                     skipped_no_date += 1
+                    rej["date"] += 1
                     max_side = max(yes_price, no_price)
                     if max_side >= 0.90:
                         no_date_samples.append((max_side, question[:60], end_str or "None"))
                     continue
                 if days_left > max_days:
+                    rej["too_far"] += 1
                     continue
 
                 # Skip binary risk markets (can lose entire stake instantly)
                 if is_binary_risk(question):
+                    rej["binary_risk"] += 1
                     continue
 
                 # Skip permanently blocked question keywords
                 if is_blocked_question(question):
+                    rej["blocked"] += 1
                     continue
 
                 spread = float(m.get("spread") or 0)
                 if spread > max_spread:
+                    rej["spread"] += 1
                     continue
 
                 # Skip markets not accepting orders (in review / paused)
                 if not m.get("acceptingOrders", True):
+                    rej["no_orders"] += 1
                     continue
 
                 theme = classify_theme(question)
@@ -572,9 +589,13 @@ class MicroScanner:
 
                 if yes_price >= dyn_wl:
                     roi = (1.0 - yes_price) / yes_price
-                    if roi >= min_roi:
+                    if roi < min_roi:
+                        rej["roi"] += 1
+                    else:
                         q = round(quality_score(yes_price, spread, days_left, vol, liq) * theme_factor, 1)
-                        if q >= min_quality:
+                        if q < min_quality:
+                            rej["quality"] += 1
+                        else:
                             candidates_for_market.append({
                                 "side": "YES",
                                 "price": yes_price,
@@ -587,9 +608,13 @@ class MicroScanner:
 
                 if no_price >= dyn_wl:
                     roi = (1.0 - no_price) / no_price
-                    if roi >= min_roi:
+                    if roi < min_roi:
+                        rej["roi"] += 1
+                    else:
                         q = round(quality_score(no_price, spread, days_left, vol, liq) * theme_factor, 1)
-                        if q >= min_quality:
+                        if q < min_quality:
+                            rej["quality"] += 1
+                        else:
                             best_bid_yes = float(m.get("bestBid") or yes_price)
                             no_best_ask = round(1.0 - best_bid_yes, 4)
                             # Always subscribe to YES token; ws_client inverts for NO
@@ -645,10 +670,11 @@ class MicroScanner:
             direct.sort(key=lambda c: (-c["quality"], c["days_left"]))
             watchlist.sort(key=lambda c: (-c["quality"], -c["price"]))
 
+            total_api = len(all_markets)
+            rej_parts = " ".join(f"{k}={v}" for k, v in rej.items() if v > 0)
             log.info(
-                f"[Scanner] {len(direct)} direct (≥{entry_price:.0%}) + "
-                f"{len(watchlist)} watchlist ({wl_min:.0%}-{entry_price:.0%}), "
-                f"≤{max_days:.0f}d | skipped {skipped_no_date} no-date"
+                f"[Scanner] API={total_api} → direct={len(direct)} wl={len(watchlist)} | "
+                f"rej: {rej_parts or 'none'}"
             )
             # Compact summary of near-certain markets we skipped due to missing/past endDate —
             # helpful to spot Polymarket `closed` flag lag without per-market spam.
