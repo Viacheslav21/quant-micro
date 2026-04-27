@@ -265,6 +265,7 @@ _BINARY_RISK_PATTERNS = [
     re.compile(r"end in a draw", re.I),                 # Soccer draw bet — binary (Win/Draw/Loss, no gradual price)
     re.compile(r"(?:btc|bitcoin|eth(?:ereum)?|sol(?:ana)?|xrp).{0,20}(?:above|over|exceed|reach|hit|surpass).{0,10}\$[\d,.k]+", re.I),  # "BTC above $76k" — can flash-crash through level instantly
     re.compile(r"(?:btc|bitcoin|eth(?:ereum)?|sol(?:ana)?|xrp).{0,20}(?:below|under|drop(?:s)?\s+to|fall\s+to).{0,10}\$[\d,.k]+", re.I),  # "BTC below $70k" — inverse of above
+    re.compile(r"\bo/u\s+\d+\.?\d*\b", re.I),          # "O/U 7.5" — sports total, crosses instantly when run/goal scored
 ]
 
 
@@ -447,6 +448,7 @@ class MicroScanner:
             "blocked": 0, "spread": 0, "no_orders": 0,
             "roi": 0, "quality": 0,
         }
+        _binary_risk_samples: list[tuple[float, str]] = []
 
         try:
             from datetime import datetime, timezone, timedelta
@@ -558,6 +560,7 @@ class MicroScanner:
                 # Skip binary risk markets (can lose entire stake instantly)
                 if is_binary_risk(question):
                     rej["binary_risk"] += 1
+                    _binary_risk_samples.append((max(yes_price, no_price), question[:70]))
                     continue
 
                 # Skip permanently blocked question keywords
@@ -676,6 +679,11 @@ class MicroScanner:
                 f"[Scanner] API={total_api} → direct={len(direct)} wl={len(watchlist)} | "
                 f"rej: {rej_parts or 'none'}"
             )
+            if _binary_risk_samples:
+                _binary_risk_samples.sort(reverse=True)
+                top = _binary_risk_samples[:5]
+                parts = [f"{p*100:.0f}¢ {q}" for p, q in top]
+                log.info(f"[Scanner] binary_risk top-5: {' | '.join(parts)}")
             # Compact summary of near-certain markets we skipped due to missing/past endDate —
             # helpful to spot Polymarket `closed` flag lag without per-market spam.
             if no_date_samples:
