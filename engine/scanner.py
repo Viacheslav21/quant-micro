@@ -449,6 +449,7 @@ class MicroScanner:
             "roi": 0, "quality": 0,
         }
         _binary_risk_samples: list[tuple[float, str]] = []
+        _quality_samples: list[tuple[float, float, float, str]] = []  # (price, q, days_left, question)
 
         try:
             from datetime import datetime, timezone, timedelta
@@ -598,6 +599,7 @@ class MicroScanner:
                         q = round(quality_score(yes_price, spread, days_left, vol, liq) * theme_factor, 1)
                         if q < min_quality:
                             rej["quality"] += 1
+                            _quality_samples.append((yes_price, q, days_left, f"YES {question[:60]}"))
                         else:
                             candidates_for_market.append({
                                 "side": "YES",
@@ -617,6 +619,7 @@ class MicroScanner:
                         q = round(quality_score(no_price, spread, days_left, vol, liq) * theme_factor, 1)
                         if q < min_quality:
                             rej["quality"] += 1
+                            _quality_samples.append((no_price, q, days_left, f"NO {question[:60]}"))
                         else:
                             best_bid_yes = float(m.get("bestBid") or yes_price)
                             no_best_ask = round(1.0 - best_bid_yes, 4)
@@ -684,6 +687,11 @@ class MicroScanner:
                 top = _binary_risk_samples[:5]
                 parts = [f"{p*100:.0f}¢ {q}" for p, q in top]
                 log.info(f"[Scanner] binary_risk top-5: {' | '.join(parts)}")
+            if _quality_samples:
+                _quality_samples.sort(reverse=True)
+                top = _quality_samples[:5]
+                parts = [f"{p*100:.0f}¢ Q{q:.0f} {d:.1f}d {question}" for p, q, d, question in top]
+                log.info(f"[Scanner] quality_fail top-5: {' | '.join(parts)}")
             # Compact summary of near-certain markets we skipped due to missing/past endDate —
             # helpful to spot Polymarket `closed` flag lag without per-market spam.
             if no_date_samples:
