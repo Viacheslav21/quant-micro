@@ -220,13 +220,16 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             pnl_dollar = ((bid_price - entry_price) / entry_price) * stake
         else:
             rest_price, _ = await _verify_price_and_volume(http_client, market_id, side)
-            if rest_price is not None:
-                rest_pnl = ((rest_price - entry_price) / entry_price) * stake
-                if rest_pnl > -max_loss:
-                    _max_loss_blocks[ws_key] = ml_blocks + 1
-                    log.info(f"[MAX LOSS BLOCKED] {market_id[:8]} WS loss=${pnl_dollar:.2f} but REST=${rest_pnl:.2f} — not real (block #{ml_blocks+1})")
-                    return
-                pnl_dollar = rest_pnl
+            if rest_price is None:
+                # REST unavailable (maintenance/outage) — never close on unverified WS data
+                log.warning(f"[MAX LOSS SKIPPED] REST unavailable for {market_id[:8]} — holding position during outage")
+                return
+            rest_pnl = ((rest_price - entry_price) / entry_price) * stake
+            if rest_pnl > -max_loss:
+                _max_loss_blocks[ws_key] = ml_blocks + 1
+                log.info(f"[MAX LOSS BLOCKED] {market_id[:8]} WS loss=${pnl_dollar:.2f} but REST=${rest_pnl:.2f} — not real (block #{ml_blocks+1})")
+                return
+            pnl_dollar = rest_pnl
         _max_loss_blocks.pop(ws_key, None)  # reset on close
         pnl = pnl_dollar - calc_exit_fee(stake, entry_price, config)
         if await _do_close(pos, pnl, "LOSS", "max_loss", **close_kw):
@@ -262,7 +265,11 @@ async def check_position_price(ws_key: str, price: float, info: dict,
     else:
         # REST verify
         rest_price, vol_24h = await _verify_price_and_volume(http_client, market_id, side)
-        check_price = rest_price if rest_price is not None else bid_price
+        if rest_price is None:
+            # REST unavailable (maintenance/outage) — skip rapid drop, don't trust WS alone
+            log.warning(f"[RAPID DROP SKIPPED] REST unavailable for {market_id[:8]} — holding position during outage")
+            return
+        check_price = rest_price
 
         if check_price >= entry_price - rapid_drop_abs:
             if rest_price is not None:
