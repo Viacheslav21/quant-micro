@@ -165,6 +165,14 @@ async def check_position_price(ws_key: str, price: float, info: dict,
 
     # ── Resolution: ≤1¢ (LOSS) ──
     if bid_price <= 0.01:
+        # REST-verify before closing — WS can send 0 during platform maintenance/outage
+        rest_price, _ = await _verify_price_and_volume(http_client, market_id, side)
+        if rest_price is None:
+            log.warning(f"[RESOLVED LOSS SKIPPED] REST unavailable for {market_id[:8]} — holding position during outage")
+            return
+        if rest_price > 0.01:
+            log.info(f"[RESOLVED LOSS BLOCKED] {market_id[:8]} WS=0 but REST={rest_price:.4f} — WS noise")
+            return
         pnl = -stake
         if await _do_close(pos, pnl, "LOSS", "resolved_loss", **close_kw):
             log.info(f"[RESOLVED] LOSS {side} '{pos['question'][:40]}' PnL: ${pnl:.2f}")
