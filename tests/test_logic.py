@@ -319,6 +319,14 @@ check("≤1d config Q=60, actual Q=55 → rejected", result == "low_quality", f"
 # ══════════════════════════════════════
 print("\n\033[1m5. Resolution Detection\033[0m")
 
+import unittest.mock as _mock
+
+def _rest_confirms(price, vol=100000.0):
+    """Factory: REST confirms the given price (accepting_orders=True)."""
+    async def _mock_fn(*a, **kw):
+        return price, vol, True
+    return _mock_fn
+
 from engine.monitor import check_position_price
 
 POS = {
@@ -339,8 +347,9 @@ check("Resolution WIN at 99¢", len(db.closed) == 1 and db.closed[0]["result"] =
 POS_LOW = {**POS, "entry_price": 0.02}  # entered at 2¢, resolved to 1¢ LOSS side
 db = MockDB(open_positions=[POS_LOW])
 pos_cache = {"mkt1_YES": POS_LOW.copy()}
-run(check_position_price("mkt1_YES", 0.01, {"best_bid": 0.01},
-    db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, pos_writes, False))
+with _mock.patch("engine.monitor._verify_price_and_volume", _rest_confirms(0.01)):
+    run(check_position_price("mkt1_YES", 0.01, {"best_bid": 0.01},
+        db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, pos_writes, False))
 check("Resolution LOSS at 1¢", len(db.closed) == 1 and db.closed[0]["result"] == "LOSS")
 
 # No action: normal price
@@ -353,8 +362,9 @@ check("Normal price: no close", len(db.closed) == 0)
 # Large drop: MAX_LOSS catches it (no sanity filter blocking)
 db = MockDB(open_positions=[POS])
 pos_cache = {"mkt1_YES": POS.copy()}
-run(check_position_price("mkt1_YES", 0.40, {"best_bid": 0.40},
-    db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, pos_writes, False))
+with _mock.patch("engine.monitor._verify_price_and_volume", _rest_confirms(0.40)):
+    run(check_position_price("mkt1_YES", 0.40, {"best_bid": 0.40},
+        db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, pos_writes, False))
 check("Large drop: MAX_LOSS triggers", len(db.closed) == 1 and db.closed[0]["reason"] == "max_loss")
 
 
@@ -366,8 +376,9 @@ print("\n\033[1m6. MAX_LOSS Cap\033[0m")
 # MAX_LOSS triggers at -$3 (entry 0.95, bid 0.80 → pnl_pct=-15.8%, $20 stake → -$3.16)
 db = MockDB(open_positions=[POS])
 pos_cache = {"mkt1_YES": POS.copy()}
-run(check_position_price("mkt1_YES", 0.80, {"best_bid": 0.80},
-    db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, pos_writes, False))
+with _mock.patch("engine.monitor._verify_price_and_volume", _rest_confirms(0.80)):
+    run(check_position_price("mkt1_YES", 0.80, {"best_bid": 0.80},
+        db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, pos_writes, False))
 check("MAX_LOSS triggers at -$3+", len(db.closed) == 1 and db.closed[0]["reason"] == "max_loss")
 
 # Just under MAX_LOSS: entry 0.95, bid 0.82 → pnl=-13.7%, -$2.74 < $3 cap → no trigger
@@ -453,8 +464,9 @@ check("Zero slippage: entry_price = best_ask",
 POS_SIM = {**POS, "entry_price": 0.945}  # after slippage
 db = MockDB(open_positions=[POS_SIM])
 pos_cache = {"mkt1_YES": POS_SIM.copy()}
-run(check_position_price("mkt1_YES", 0.80, {"best_bid": 0.80},
-    db, MockWS(), MockTG(), SIM_CONFIG, None, pos_cache, {}, False))
+with _mock.patch("engine.monitor._verify_price_and_volume", _rest_confirms(0.80)):
+    run(check_position_price("mkt1_YES", 0.80, {"best_bid": 0.80},
+        db, MockWS(), MockTG(), SIM_CONFIG, None, pos_cache, {}, False))
 if db.closed:
     # PnL without costs: (0.80 - 0.945) / 0.945 * 20 = -3.07
     # Costs: slippage_exit = 0.005 * 20 / 0.945 = 0.106 + fee = 0.02 * 20 = 0.40
@@ -531,8 +543,9 @@ db = MockDB(open_positions=[POS_RD])
 pos_cache = {"mkt1_YES": POS_RD.copy()}
 _rest_cooldown.clear()
 # bid=0.87 → drop = 0.95 - 0.87 = 8¢ > 7¢
-run(check_position_price("mkt1_YES", 0.87, {"best_bid": 0.87},
-    db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, {}, False))
+with _mock.patch("engine.monitor._verify_price_and_volume", _rest_confirms(0.87)):
+    run(check_position_price("mkt1_YES", 0.87, {"best_bid": 0.87},
+        db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, {}, False))
 check("Rapid drop fires (8¢ drop)", len(db.closed) == 1 and db.closed[0]["reason"] == "rapid_drop")
 
 # -- Rapid drop works near expiry too --
@@ -540,8 +553,9 @@ POS_RD_NEAR = {**POS, "end_date": near_end}
 db = MockDB(open_positions=[POS_RD_NEAR])
 pos_cache = {"mkt1_YES": POS_RD_NEAR.copy()}
 _rest_cooldown.clear()
-run(check_position_price("mkt1_YES", 0.87, {"best_bid": 0.87},
-    db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, {}, False))
+with _mock.patch("engine.monitor._verify_price_and_volume", _rest_confirms(0.87)):
+    run(check_position_price("mkt1_YES", 0.87, {"best_bid": 0.87},
+        db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, {}, False))
 check("Rapid drop works ≤1d (no SL disable)", len(db.closed) == 1 and db.closed[0]["reason"] == "rapid_drop")
 
 # -- RAPID_DROP_PCT from config --
@@ -558,8 +572,9 @@ check("RAPID_DROP_PCT=10¢: 8¢ drop → no close", len(db.closed) == 0)
 db = MockDB(open_positions=[{**POS, "end_date": far_end}])
 pos_cache = {"mkt1_YES": {**POS, "end_date": far_end}}
 _rest_cooldown.clear()
-run(check_position_price("mkt1_YES", 0.84, {"best_bid": 0.84},
-    db, MockWS(), MockTG(), CUSTOM_RD, None, pos_cache, {}, False))
+with _mock.patch("engine.monitor._verify_price_and_volume", _rest_confirms(0.84)):
+    run(check_position_price("mkt1_YES", 0.84, {"best_bid": 0.84},
+        db, MockWS(), MockTG(), CUSTOM_RD, None, pos_cache, {}, False))
 check("RAPID_DROP_PCT=10¢: 11¢ drop → triggers", len(db.closed) == 1 and db.closed[0]["reason"] == "rapid_drop")
 
 # -- Rapid drop with fees --
@@ -568,8 +583,9 @@ db = MockDB(open_positions=[POS_RD_SIM])
 pos_cache = {"mkt1_YES": POS_RD_SIM.copy()}
 _rest_cooldown.clear()
 SIM_C = {**BASE_CONFIG, "SLIPPAGE": 0.005, "FEE_PCT": 0.02}
-run(check_position_price("mkt1_YES", 0.85, {"best_bid": 0.85},
-    db, MockWS(), MockTG(), SIM_C, None, pos_cache, {}, False))
+with _mock.patch("engine.monitor._verify_price_and_volume", _rest_confirms(0.85)):
+    run(check_position_price("mkt1_YES", 0.85, {"best_bid": 0.85},
+        db, MockWS(), MockTG(), SIM_C, None, pos_cache, {}, False))
 if db.closed:
     rd_pnl = db.closed[0]["pnl"]
     raw_pnl = (0.85 - 0.945) / 0.945 * 20
@@ -616,7 +632,7 @@ check("Allow: Map winner (no number)", not is_binary_risk("Who wins the map vote
 print("\n\033[1m13. Rapid Drop Block Counter\033[0m")
 
 import engine.monitor as _mon
-from engine.monitor import check_position_price, _rest_cooldown, _rapid_drop_blocks
+from engine.monitor import check_position_price, _rest_cooldown, _rapid_drop_blocks, _max_loss_blocks
 
 far_end_13 = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
 POS_13 = {
@@ -641,10 +657,10 @@ class MockDBWithRestPrice(MockDB):
 import unittest.mock as mock
 
 async def _rest_above_threshold(*a, **kw):
-    return 0.90, 100000.0  # above threshold (entry=0.945, threshold=0.875)
+    return 0.90, 100000.0, True  # above threshold (entry=0.945, threshold=0.875)
 
 async def _rest_none(*a, **kw):
-    return None, None
+    return None, None, True
 
 # Test 1: REST blocks rapid drop → block counter increments
 _rest_cooldown.clear()
@@ -708,6 +724,31 @@ run(check_position_price("mkt13_YES", 0.995, {"best_bid": 0.995},
     db, MockWS(), MockTG(), BASE_CONFIG, None, pos_cache, {}, False))
 check("Close (WIN): block counter cleared", "mkt13_YES" not in _rapid_drop_blocks)
 
+# Test 7: accepting_orders=False → MAX_LOSS paused (maintenance protection)
+_rest_cooldown.clear()
+_rapid_drop_blocks.clear()
+_max_loss_blocks.clear()
+async def _rest_paused(*a, **kw):
+    return 0.80, 100000.0, False  # price confirms loss BUT market is paused
+db = MockDBWithRestPrice(open_positions=[POS_13])
+pos_cache = {"mkt13_YES": POS_13.copy()}
+# bid=0.80 → max_loss triggers, but accepting_orders=False → must NOT close
+with mock.patch("engine.monitor._verify_price_and_volume", _rest_paused):
+    run(check_position_price("mkt13_YES", 0.80, {"best_bid": 0.80},
+        db, MockWS(), MockTG(), BASE_CONFIG, object(), pos_cache, {}, False))
+check("Maintenance: MAX_LOSS not fired when accepting_orders=False", len(db.closed) == 0)
+
+# Test 8: resolved_loss paused when accepting_orders=False
+_rest_cooldown.clear()
+async def _rest_zero_paused(*a, **kw):
+    return 0.01, 100000.0, False  # price=1¢ AND market paused
+db = MockDBWithRestPrice(open_positions=[{**POS_13, "entry_price": 0.02}])
+pos_cache = {"mkt13_YES": {**POS_13, "entry_price": 0.02}}
+with mock.patch("engine.monitor._verify_price_and_volume", _rest_zero_paused):
+    run(check_position_price("mkt13_YES", 0.01, {"best_bid": 0.01},
+        db, MockWS(), MockTG(), BASE_CONFIG, object(), pos_cache, {}, False))
+check("Maintenance: resolved_loss not fired when accepting_orders=False", len(db.closed) == 0)
+
 
 # ══════════════════════════════════════
 # 14. rest_poll_stale_positions
@@ -733,7 +774,7 @@ ws_fresh.prices = {
 }
 db = MockDBWithRestPrice(open_positions=OPEN_POS_14)
 _rest_cooldown.clear()
-async def _rest_fresh(*a, **kw): return 0.93, 100000.0
+async def _rest_fresh(*a, **kw): return 0.93, 100000.0, True
 with mock.patch("engine.monitor._verify_price_and_volume", _rest_fresh):
     run(rest_poll_stale_positions(OPEN_POS_14, db=db, ws=ws_fresh, tg=MockTG(),
         config=BASE_CONFIG, http_client=object(),
@@ -748,7 +789,7 @@ ws_stale.prices = {
 }
 db = MockDBWithRestPrice(open_positions=OPEN_POS_14)
 _rest_cooldown.clear()
-async def _rest_win(*a, **kw): return 0.995, 100000.0  # WIN price
+async def _rest_win(*a, **kw): return 0.995, 100000.0, True  # WIN price
 with mock.patch("engine.monitor._verify_price_and_volume", _rest_win):
     run(rest_poll_stale_positions(OPEN_POS_14, db=db, ws=ws_stale, tg=MockTG(),
         config=BASE_CONFIG, http_client=object(),
@@ -862,13 +903,13 @@ TP_CONFIG = {**BASE_CONFIG, "TAKE_PROFIT_PRICE": 0.98, "TAKE_PROFIT_MIN_DAYS": 1
              "SLIPPAGE": 0.005, "FEE_PCT": 0.02}
 
 async def _rest_tp_confirms(*a, **kw):
-    return 0.981, 100000.0
+    return 0.981, 100000.0, True
 
 async def _rest_tp_below(*a, **kw):
-    return 0.972, 100000.0  # below TP threshold → spike, don't sell
+    return 0.972, 100000.0, True  # below TP threshold → spike, don't sell
 
 async def _rest_tp_none(*a, **kw):
-    return None, None
+    return None, None, True
 
 # 1. Price at 98.1¢, 3 days left, REST confirms → TP triggered
 _rc16.clear()
@@ -920,7 +961,7 @@ rest_call_count = 0
 async def _rest_tp_counting(*a, **kw):
     global rest_call_count
     rest_call_count += 1
-    return 0.982, 100000.0
+    return 0.982, 100000.0, True
 
 POS_16c = {**POS_16, "id": "pos16c", "market_id": "mkt16c", "end_date": _far_end_16}
 db = MockDB(open_positions=[POS_16c])

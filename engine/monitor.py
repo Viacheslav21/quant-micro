@@ -59,19 +59,22 @@ async def _fetch_market_data(http_client: httpx.AsyncClient, market_id: str):
 
 
 async def _verify_price_and_volume(http_client: httpx.AsyncClient, market_id: str, side: str):
-    """Single REST call: fetch price + 24h volume. Returns (side_price, vol_24h) or (None, None).
+    """Single REST call: fetch price + 24h volume + accepting_orders.
+    Returns (side_price, vol_24h, accepting_orders) or (None, None, True) on error.
+    accepting_orders=False means the market is paused/in maintenance — never close in this state.
     Retries once on timeout/network error (critical for SL verification)."""
     if not http_client:
-        return None, None
+        return None, None, True
     try:
         m = await _fetch_market_data(http_client, market_id)
+        accepting = bool(m.get("acceptingOrders", True))
         yes_p, no_p = parse_outcome_prices(m)
         price = no_p if side == "NO" else yes_p
         vol_24h = float(m.get("volume24hr") or 0)
-        return round(price, 4) if price > 0 else None, vol_24h
+        return round(price, 4) if price > 0 else None, vol_24h, accepting
     except Exception as e:
         log.warning(f"[REST] Verify failed for {market_id[:8]}: {e}")
-        return None, None
+        return None, None, True
 
 
 async def _do_close(pos, pnl, result, reason, ws_key,
@@ -166,7 +169,10 @@ async def check_position_price(ws_key: str, price: float, info: dict,
     # ── Resolution: ≤1¢ (LOSS) ──
     if bid_price <= 0.01:
         # REST-verify before closing — WS can send 0 during platform maintenance/outage
-        rest_price, _ = await _verify_price_and_volume(http_client, market_id, side)
+        rest_price, _, accepting = await _verify_price_and_volume(http_client, market_id, side)
+        if not accepting:
+            log.warning(f"[RESOLVED LOSS PAUSED] {market_id[:8]} market not accepting orders — holding during maintenance")
+            return
         if rest_price is None:
             log.warning(f"[RESOLVED LOSS SKIPPED] REST unavailable for {market_id[:8]} — holding position during outage")
             return
@@ -206,7 +212,10 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         tp_cd_key = f"tp_{market_id}"
         if now_ts - _rest_cooldown.get(tp_cd_key, 0) >= _REST_COOLDOWN_SEC:
             _rest_cooldown[tp_cd_key] = now_ts
-            rest_price, _ = await _verify_price_and_volume(http_client, market_id, side)
+            rest_price, _, accepting = await _verify_price_and_volume(http_client, market_id, side)
+            if not accepting:
+                log.warning(f"[TAKE PROFIT PAUSED] {market_id[:8]} market not accepting orders — skipping during maintenance")
+                return
             if rest_price is not None and rest_price >= tp_price and rest_price >= entry_price + tp_min_gain:
                 pnl = ((rest_price - entry_price) / entry_price) * stake - calc_exit_fee(stake, entry_price, config)
                 if await _do_close(pos, pnl, "WIN", "take_profit",
@@ -227,7 +236,10 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             log.info(f"[MAX LOSS] Bypassing REST after {ml_blocks} blocks — trusting WS bid={bid_price:.4f}")
             pnl_dollar = ((bid_price - entry_price) / entry_price) * stake
         else:
-            rest_price, _ = await _verify_price_and_volume(http_client, market_id, side)
+            rest_price, _, accepting = await _verify_price_and_volume(http_client, market_id, side)
+            if not accepting:
+                log.warning(f"[MAX LOSS PAUSED] {market_id[:8]} market not accepting orders — holding during maintenance")
+                return
             if rest_price is None:
                 # REST unavailable (maintenance/outage) — never close on unverified WS data
                 log.warning(f"[MAX LOSS SKIPPED] REST unavailable for {market_id[:8]} — holding position during outage")
@@ -272,7 +284,10 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         check_price = bid_price
     else:
         # REST verify
-        rest_price, vol_24h = await _verify_price_and_volume(http_client, market_id, side)
+        rest_price, vol_24h, accepting = await _verify_price_and_volume(http_client, market_id, side)
+        if not accepting:
+            log.warning(f"[RAPID DROP PAUSED] {market_id[:8]} market not accepting orders — holding during maintenance")
+            return
         if rest_price is None:
             # REST unavailable (maintenance/outage) — skip rapid drop, don't trust WS alone
             log.warning(f"[RAPID DROP SKIPPED] REST unavailable for {market_id[:8]} — holding position during outage")
@@ -338,7 +353,10 @@ async def rest_poll_stale_positions(open_positions: list,
     for (ws_key, pos), result in zip(stale, prices):
         if isinstance(result, Exception) or result[0] is None:
             continue
-        rest_price, _ = result
+        rest_price, _, accepting = result
+        if not accepting:
+            log.warning(f"[REST POLL PAUSED] {pos['market_id'][:8]} market not accepting orders — skipping exit logic")
+            continue
         market_id, side = pos["market_id"], pos["side"]
         # Record to price history so we can see the gap
         await db.record_price_tick(market_id, side, rest_price, "rest_poll")
