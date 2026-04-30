@@ -1052,6 +1052,29 @@ check("esports 1d: capped at MAX_STAKE not MAX_STAKE_1D", calc_stake(1000, cfg_d
 check("esports >1d: still MAX_STAKE", calc_stake(1000, cfg_dyn, days_left=3.0, theme="esports") == 20.0)
 check("non-esports 6h: still gets MAX_STAKE_6H", calc_stake(1000, cfg_dyn, days_left=0.1, theme="crypto") == 50.0)
 
+# Q≥80 + ≤6h tier: bumped Kelly fraction (7.5%) and higher cap (MAX_STAKE_Q80_6H)
+# Production data: Q80+ is 100% WR (15/15) — undercapitalized at base 5%.
+cfg_q80 = {"MAX_STAKE": 20.0, "MIN_STAKE": 5.0, "MAX_STAKE_6H": 50.0, "MAX_STAKE_1D": 35.0,
+           "MAX_STAKE_Q80_6H": 75.0, "PCT_STAKE_Q80": 0.075}
+# Bankroll $1239 (~real prod): pct=7.5% → $93, capped at MAX_STAKE_Q80_6H=$75
+check("Q80+6h: bankroll $1239, 7.5%=$93 capped at $75", calc_stake(1239, cfg_q80, days_left=0.1, quality=80) == 75.0)
+check("Q80+6h: exact Q=80 boundary (≥80)", calc_stake(1239, cfg_q80, days_left=0.1, quality=80) == 75.0)
+check("Q90+6h: same uplift", calc_stake(1239, cfg_q80, days_left=0.1, quality=95) == 75.0)
+# Q79 must NOT trigger uplift — falls back to MAX_STAKE_6H
+check("Q79+6h: NOT uplifted, uses MAX_STAKE_6H=$50", calc_stake(1239, cfg_q80, days_left=0.1, quality=79) == 50.0)
+# Q80 but >6h: uses ≤1d/≥1d rules (not Q80 path)
+check("Q80 + 0.5d: uses MAX_STAKE_1D not Q80_6H", calc_stake(1239, cfg_q80, days_left=0.5, quality=85) == 35.0)
+check("Q80 + 2d: uses MAX_STAKE", calc_stake(1239, cfg_q80, days_left=2.0, quality=90) == 20.0)
+# Q80+esports: esports rule wins (uplift disabled for esports regardless of quality)
+check("esports Q80+6h: still capped at MAX_STAKE", calc_stake(1239, cfg_q80, days_left=0.1, theme="esports", quality=90) == 20.0)
+# Lower bankroll: pct binds before cap
+check("Q80+6h: bankroll $500, 7.5%=$37.5 (pct binds)", calc_stake(500, cfg_q80, days_left=0.1, quality=85) == 37.5)
+# Defaults: missing config keys → fallback to defaults
+cfg_no_q80 = {"MAX_STAKE": 20.0, "MIN_STAKE": 5.0, "MAX_STAKE_6H": 50.0}
+check("Q80+6h fallback: default $75 cap, default 7.5% pct", calc_stake(1239, cfg_no_q80, days_left=0.1, quality=85) == 75.0)
+# Backward compat: no quality argument → defaults to 0 (no uplift)
+check("No quality arg: no Q80 uplift", calc_stake(1239, cfg_q80, days_left=0.1) == 50.0)
+
 # try_enter passes days_left: 6h market gets bigger stake
 print("  (try_enter dynamic stake integration via calc_stake directly ↑)")
 

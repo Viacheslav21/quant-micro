@@ -63,7 +63,7 @@ Polymarket API → Scanner (every 2 min, 1600 markets max)
 - **Quality Scoring**: 0-100 base score with **sweet spot 93-96¢** (not linear high=better). Price (0-40): peak 93-96¢, penalizes ≥98¢ (thin ROI after fees) and <90¢ (uncertain). Spread (0-15) tighter=better. Days (0-30) closer=better (≤0.5d gets max). Volume (0-15). **Dynamic quality threshold by time-to-resolution**: ≤1d→Q≥40 (base), 1-3d→Q≥55, 3-5d→Q≥70, 5d+→Q≥80.
 - **Theme-Adjusted Quality**: Base quality is multiplied by a Bayesian theme factor before the quality gate. `adj_q = base_q × (theme_adj_wr / TARGET_WR)`, clamped to [0.75, 1.05]. `theme_adj_wr` uses the same Bayesian shrinkage (k=20) as `recalibrate_theme()`. Effect: crypto (WR≈81%) factor≈0.87 → Q70 becomes Q61; climate (WR≈94%) factor≈1.01 → Q70 stays Q71; election (WR≈70%) hits floor 0.75 → Q70 becomes Q52. Themes with <10 trades use factor=1.0 (no adjustment). Updated each scan cycle from `db.get_theme_adj_wr()` in parallel with `get_open_positions()`, stored on `scanner.theme_wr` (1-cycle lag, intentional). Self-correcting: if a theme improves over time, its factor rises automatically.
 - **Scanner price ceiling**: Markets where both sides >98¢ are skipped (ROI<2%, after costs ≈ break-even).
-- **Entry Logic**: Buy YES/NO at best_ask price. Stake = 5% of bankroll, dynamically capped by time-to-expiry (≤6h→MAX_STAKE_6H=$50, ≤1d→MAX_STAKE_1D=$35, >1d→MAX_STAKE=$20). ROI at resolution must be ≥1.8%.
+- **Entry Logic**: Buy YES/NO at best_ask price. Stake = `PCT_STAKE` of bankroll (default 5%), dynamically capped by time-to-expiry: Q≥80 + ≤6h → `MAX_STAKE_Q80_6H=$75` with 7.5% Kelly (production data: 100% WR / 15-15 trades, was undercapitalized at base 5%); ≤6h → `MAX_STAKE_6H=$50`; ≤1d → `MAX_STAKE_1D=$35`; >1d → `MAX_STAKE=$20`. ROI at resolution must be ≥1.8%. Esports always uses base `MAX_STAKE` regardless of quality/time (flash-crash risk).
 - **Early Take-Profit**: When WS bid ≥ TAKE_PROFIT_PRICE (default 98¢) and days_to_expiry > TAKE_PROFIT_MIN_DAYS (default 1d), REST-verify and exit immediately. Frees capital for redeployment. Exit fee applies. Cooldown 60s to avoid repeated REST calls on sustained high price.
 - **MAX_LOSS Hard Cap**: Default $3 per position, always enforced. REST-verified via CLOB book API (live orderbook, not lagging Gamma midpoint) with tenacity retry. Records real PnL at exit price (not capped). After `MAX_LOSS_BYPASS_BLOCKS` (default 2, configurable) consecutive REST disagreements, bypasses REST and trusts WS bid directly.
 - **Rapid Drop Guard**: Exit if bid drops more than RAPID_DROP_PCT (default 7¢) from entry. REST-verified, volume-confirmed. Configurable via dashboard.
@@ -95,10 +95,10 @@ Polymarket API → Scanner (every 2 min, 1600 markets max)
 
 ### Configuration
 
-Config loaded from environment variables at startup, then overridden at runtime by `config_live` DB table (seeded by engine's `_seed_config_live`). `_reload_config()` merges DB overrides into the `CONFIG` dict (safe keys only, never credentials). Triggered instantly via `LISTEN config_reload` channel (auto-reconnects on connection loss). 22 micro parameters exposed for live editing in the dashboard:
+Config loaded from environment variables at startup, then overridden at runtime by `config_live` DB table (seeded by engine's `_seed_config_live`). `_reload_config()` merges DB overrides into the `CONFIG` dict (safe keys only, never credentials). Triggered instantly via `LISTEN config_reload` channel (auto-reconnects on connection loss). 24 micro parameters exposed for live editing in the dashboard:
 - **Signals**: `ENTRY_MIN_PRICE`, `WATCHLIST_MIN_PRICE`, `MIN_ROI`, `MIN_QUALITY_SCORE`, `ENTRY_PRICE_1D`, `ENTRY_PRICE_2D`, `ENTRY_PRICE_3D`
 - **Risk**: `RAPID_DROP_PCT`, `MAX_LOSS_PER_POS`, `MAX_LOSS_BYPASS_BLOCKS`
-- **Sizing**: `MAX_STAKE`, `MIN_STAKE`
+- **Sizing**: `MAX_STAKE`, `MIN_STAKE`, `MAX_STAKE_Q80_6H`, `PCT_STAKE_Q80`
 - **Capacity**: `MAX_OPEN`, `MAX_PER_THEME`, `MAX_PER_NEG_RISK`
 - **Filters**: `MAX_DAYS_LEFT`, `MIN_VOLUME`
 - **Timing**: `SCAN_INTERVAL`

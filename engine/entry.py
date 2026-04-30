@@ -25,23 +25,33 @@ def update_watchlist_cache(items: list):
 
 
 def calc_stake(bankroll: float, config: dict, days_left: float = 99,
-               theme: str = "") -> float:
-    """Stake = 5% of bankroll, capped by MAX_STAKE.
+               theme: str = "", quality: float = 0) -> float:
+    """Stake = N% of bankroll (default 5%), capped by MAX_STAKE.
     Near-expiry markets get a higher cap: ≤6h→MAX_STAKE_6H, ≤1d→MAX_STAKE_1D.
-    Rationale: shorter time = lower risk of adverse move = Kelly says bet more.
+    Q≥80 + ≤6h tier — best evidence-based bucket: production data shows Q80+
+    has 100% WR (15/15 trades, avg +$1.81), undercapitalized at base 5%.
+    Bumps Kelly fraction to PCT_STAKE_Q80 (default 7.5%) and uses MAX_STAKE_Q80_6H
+    as the hard cap. Rationale: shorter time + higher quality = lower variance =
+    Kelly says bet more.
     Exception: esports — live matches can resolve 95¢→0¢ in minutes regardless
-    of time-to-expiry. Dynamic stake uplift does NOT apply; use MAX_STAKE only."""
-    pct_stake = bankroll * 0.05
-
+    of time-to-expiry/quality. Dynamic stake uplift does NOT apply."""
     if theme == "esports":
         max_s = config["MAX_STAKE"]
+        pct = 0.05
+    elif quality >= 80 and days_left <= 0.25:
+        max_s = config.get("MAX_STAKE_Q80_6H", 75.0)
+        pct = float(config.get("PCT_STAKE_Q80", 0.075))
     elif days_left <= 0.25:
         max_s = config.get("MAX_STAKE_6H", config["MAX_STAKE"] * 2.5)
+        pct = 0.05
     elif days_left <= 1.0:
         max_s = config.get("MAX_STAKE_1D", config["MAX_STAKE"] * 1.75)
+        pct = 0.05
     else:
         max_s = config["MAX_STAKE"]
+        pct = 0.05
 
+    pct_stake = bankroll * pct
     stake = min(max_s, max(pct_stake, config["MIN_STAKE"]))
     if stake > bankroll:
         return 0.0
@@ -85,10 +95,11 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
             return "theme_limit"
 
     days_left = candidate.get("days_left", 99)
+    quality = candidate.get("quality", 0)
 
     stats = await db.get_stats(config["BANKROLL"])
     bankroll = stats.get("bankroll", config["BANKROLL"])
-    stake = calc_stake(bankroll, config, days_left=days_left, theme=theme)
+    stake = calc_stake(bankroll, config, days_left=days_left, theme=theme, quality=quality)
 
     if stake < config["MIN_STAKE"]:
         now = time.time()
@@ -106,7 +117,6 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     if roi < config["MIN_ROI"]:
         return "low_roi"
 
-    quality = candidate.get("quality", 0)
     # Dynamic quality threshold: far markets need higher quality
     base_q = config["MIN_QUALITY_SCORE"]
     if days_left <= 1:

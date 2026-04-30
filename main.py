@@ -62,6 +62,9 @@ CONFIG = {
     # Dynamic max stake by time to expiry — higher certainty = bigger bet
     "MAX_STAKE_6H":       float(os.getenv("MAX_STAKE_6H", "50.0")),   # ≤6h to expiry
     "MAX_STAKE_1D":       float(os.getenv("MAX_STAKE_1D", "35.0")),   # ≤1d to expiry
+    # Q≥80 + ≤6h tier — production data: 100% WR, undercapitalized at base 5%
+    "MAX_STAKE_Q80_6H":   float(os.getenv("MAX_STAKE_Q80_6H", "75.0")),
+    "PCT_STAKE_Q80":      float(os.getenv("PCT_STAKE_Q80", "0.075")),  # 7.5% Kelly fraction (vs 5% default)
 }
 
 # ── Logging ──
@@ -92,6 +95,7 @@ _SAFE_CONFIG_KEYS = {
     "MAX_DAYS_LEFT", "MIN_VOLUME", "SCAN_INTERVAL", "CONFIG_TAG", "MAX_PER_NEG_RISK",
     "BANKROLL", "SLIPPAGE", "FEE_PCT",
     "TAKE_PROFIT_PRICE", "TAKE_PROFIT_MIN_DAYS", "MAX_STAKE_6H", "MAX_STAKE_1D",
+    "MAX_STAKE_Q80_6H", "PCT_STAKE_Q80",
 }
 
 
