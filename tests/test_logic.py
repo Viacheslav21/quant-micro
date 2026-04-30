@@ -152,11 +152,17 @@ check("Block: between $X and $Y", is_binary_risk("Will BTC be between $70,000 an
 check("Block: between temp range", is_binary_risk("Will temp be between 20°C and 25°C?"))
 check("Block: between % range", is_binary_risk("Will inflation be between 2.5% and 3.0%?"))
 
-# Should ALLOW
-check("Allow: dip to $X", not is_binary_risk("Will Bitcoin dip to $64,000?"))
+# Should BLOCK — crypto price-target markets (flash-crash risk)
+# "dip to" was previously allowed; production data showed all 6 BTC dip-to markets
+# hit max_loss (-$25+ in 30d) — same flash-move risk profile as "drop to" / "below".
+check("Block: dip to $X", is_binary_risk("Will Bitcoin dip to $64,000?"))
+check("Block: dips to $X (plural)", is_binary_risk("Will BTC dips to $70k?"))
+check("Block: ethereum dip to $X", is_binary_risk("Will Ethereum dip to $2,250?"))
 check("Block: crypto above $X", is_binary_risk("Will Bitcoin be above $72,000?"))
 check("Block: btc reach $X", is_binary_risk("Will Bitcoin reach $78,000?"))
 check("Block: eth above $X", is_binary_risk("Will Ethereum exceed $3,500?"))
+
+# Should ALLOW
 check("Block: end in a draw", is_binary_risk("Will the match end in a draw?"))
 check("Allow: more than X°C", not is_binary_risk("Will temp increase by more than 1.29°C?"))
 check("Allow: highest temp be X°C", not is_binary_risk("Will highest temp in Tokyo be 20°C?"))
