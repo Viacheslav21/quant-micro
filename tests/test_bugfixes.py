@@ -404,5 +404,151 @@ class TestWsUpdateLastSeen(unittest.TestCase):
         self.assertIsNone(info)
 
 
+# ── CLOB book API parsing ──
+
+from engine.monitor import _parse_clob_book
+
+
+class TestClobBookParse(unittest.TestCase):
+    """Replaces lagged Gamma midpoint with live CLOB orderbook for REST verify."""
+
+    def test_normal_book(self):
+        book = {
+            "bids": [{"price": "0.74", "size": "500"}, {"price": "0.73", "size": "100"}],
+            "asks": [{"price": "0.78", "size": "300"}, {"price": "0.79", "size": "200"}],
+        }
+        bid, ask = _parse_clob_book(book)
+        self.assertAlmostEqual(bid, 0.74)
+        self.assertAlmostEqual(ask, 0.78)
+
+    def test_zero_size_levels_skipped(self):
+        """Zero-size levels are pulled orders, not real depth."""
+        book = {
+            "bids": [{"price": "0.90", "size": "0"}, {"price": "0.74", "size": "500"}],
+            "asks": [{"price": "0.78", "size": "300"}, {"price": "0.50", "size": "0"}],
+        }
+        bid, ask = _parse_clob_book(book)
+        self.assertAlmostEqual(bid, 0.74, msg="0-size bid at 0.90 should be ignored")
+        self.assertAlmostEqual(ask, 0.78, msg="0-size ask at 0.50 should be ignored")
+
+    def test_unsorted_levels(self):
+        """CLOB may return unsorted — parser picks best (max bid, min ask)."""
+        book = {
+            "bids": [{"price": "0.71", "size": "100"}, {"price": "0.74", "size": "500"}, {"price": "0.72", "size": "200"}],
+            "asks": [{"price": "0.81", "size": "50"}, {"price": "0.78", "size": "300"}, {"price": "0.79", "size": "200"}],
+        }
+        bid, ask = _parse_clob_book(book)
+        self.assertAlmostEqual(bid, 0.74)
+        self.assertAlmostEqual(ask, 0.78)
+
+    def test_empty_book(self):
+        bid, ask = _parse_clob_book({"bids": [], "asks": []})
+        self.assertEqual(bid, 0.0)
+        self.assertEqual(ask, 0.0)
+
+    def test_missing_keys(self):
+        bid, ask = _parse_clob_book({})
+        self.assertEqual(bid, 0.0)
+        self.assertEqual(ask, 0.0)
+
+    def test_string_numbers(self):
+        """Polymarket returns price/size as strings."""
+        book = {"bids": [{"price": "0.5", "size": "10"}], "asks": [{"price": "0.6", "size": "20"}]}
+        bid, ask = _parse_clob_book(book)
+        self.assertAlmostEqual(bid, 0.5)
+        self.assertAlmostEqual(ask, 0.6)
+
+
+# ── SL blacklist now blocks max_loss ──
+
+class TestSLBlacklistMaxLoss(unittest.TestCase):
+    """Bug: max_loss closes were not in the SL blacklist IN clause, allowing
+    instant re-entry after the 6h cooldown — same market lost repeatedly."""
+
+    def test_db_query_includes_max_loss(self):
+        """Verify the SQL constant in db.py covers all three close reasons."""
+        with open(os.path.join(ROOT, "utils", "db.py")) as f:
+            src = f.read()
+        # The SL blacklist EXISTS clause must include max_loss
+        self.assertIn(
+            "close_reason IN ('stop_loss','rapid_drop','max_loss')",
+            src,
+            "SL blacklist must include 'max_loss' to prevent re-entry on losers",
+        )
+
+
+# ── rest_poll: doesn't clobber best_bid; bumps block counter on cap breach ──
+
+class TestRestPollNoClobber(unittest.TestCase):
+    """rest_poll used to overwrite ws.prices[ws_key]['best_bid'] with REST midpoint,
+    erasing a real WS-observed drop. Now it only refreshes last_update."""
+
+    def test_source_does_not_overwrite_best_bid(self):
+        with open(os.path.join(ROOT, "engine", "monitor.py")) as f:
+            src = f.read()
+        # Find the rest_poll function body
+        start = src.index("async def rest_poll_stale_positions")
+        end = src.index("\n\n", start + 100) if "\n\n" in src[start + 100:] else len(src)
+        body = src[start:end + 5000]  # generous slice
+        # Old code wrote ws.prices[ws_key]["best_bid"] = rest_price — that's what we removed
+        self.assertNotIn(
+            'ws.prices[ws_key]["best_bid"] = rest_price',
+            body,
+            "rest_poll must not overwrite WS best_bid (preserves WS-observed drops)",
+        )
+
+    def test_increments_max_loss_blocks_on_cap_breach(self):
+        """When REST already shows loss past cap, rest_poll bumps the block counter
+        so silent-WS positions reach bypass_thresh in finite time."""
+        with open(os.path.join(ROOT, "engine", "monitor.py")) as f:
+            src = f.read()
+        start = src.index("async def rest_poll_stale_positions")
+        body = src[start:]
+        self.assertIn("_max_loss_blocks[ws_key] = _max_loss_blocks.get(ws_key, 0) + 1", body)
+        self.assertIn("rest_pnl <= -max_loss", body)
+
+
+# ── _verify_price_and_volume: signature + CLOB-first behavior ──
+
+class TestVerifyPriceSignature(unittest.TestCase):
+    def test_accepts_token_id(self):
+        """token_id parameter is the YES outcome token; required for CLOB book lookup."""
+        import inspect
+        from engine.monitor import _verify_price_and_volume
+        sig = inspect.signature(_verify_price_and_volume)
+        self.assertIn("token_id", sig.parameters)
+        # Default None for backwards-compat with callers that lack the token
+        self.assertIsNone(sig.parameters["token_id"].default)
+
+    def test_no_token_falls_back_to_gamma(self):
+        """With token_id=None, must still return a result (Gamma midpoint fallback)."""
+        with open(os.path.join(ROOT, "engine", "monitor.py")) as f:
+            src = f.read()
+        # The fallback path is the Gamma midpoint via parse_outcome_prices
+        self.assertIn("parse_outcome_prices(m)", src)
+        self.assertIn("Fallback", src)
+
+
+# ── MAX_LOSS bypass threshold is configurable ──
+
+class TestMaxLossBypassConfig(unittest.TestCase):
+    def test_default_is_2(self):
+        from engine.monitor import _MAX_LOSS_BYPASS_BLOCKS_DEFAULT
+        self.assertEqual(_MAX_LOSS_BYPASS_BLOCKS_DEFAULT, 2)
+
+    def test_read_from_config(self):
+        with open(os.path.join(ROOT, "engine", "monitor.py")) as f:
+            src = f.read()
+        self.assertIn('config.get("MAX_LOSS_BYPASS_BLOCKS"', src)
+
+    def test_in_safe_config_keys(self):
+        with open(os.path.join(ROOT, "main.py")) as f:
+            src = f.read()
+        self.assertIn("MAX_LOSS_BYPASS_BLOCKS", src)
+        # Must be in _SAFE_CONFIG_KEYS so live reload accepts overrides
+        safe_block = src[src.index("_SAFE_CONFIG_KEYS"):src.index("}", src.index("_SAFE_CONFIG_KEYS"))]
+        self.assertIn("MAX_LOSS_BYPASS_BLOCKS", safe_block)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

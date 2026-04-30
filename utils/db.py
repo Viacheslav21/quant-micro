@@ -408,7 +408,7 @@ class Database:
                 SELECT
                     EXISTS(SELECT 1 FROM micro_positions WHERE market_id=$1 AND side=$2 AND status='open') as has_open,
                     EXISTS(SELECT 1 FROM micro_positions WHERE market_id=$1 AND side=$2
-                           AND status='closed' AND close_reason IN ('stop_loss','rapid_drop')) as has_sl,
+                           AND status='closed' AND close_reason IN ('stop_loss','rapid_drop','max_loss')) as has_sl,
                     EXISTS(SELECT 1 FROM micro_positions WHERE market_id=$1 AND side=$2
                            AND status='closed' AND closed_at > NOW() - INTERVAL '1 hour' * $3) as has_recent,
                     COALESCE((SELECT blocked FROM micro_theme_stats WHERE theme=$4), false) as theme_blocked

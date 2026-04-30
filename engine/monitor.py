@@ -1,5 +1,6 @@
 """Position monitoring: MAX_LOSS, rapid drop, resolution detection via WS."""
 
+import asyncio
 import time
 import logging
 
@@ -22,9 +23,11 @@ _REST_COOLDOWN_SEC = 60
 # during fast moves (e.g. BTC approaching a price target).
 _rapid_drop_blocks: dict = {}  # ws_key → int
 
-# Max loss block counter: same logic for MAX_LOSS. REST can lag for 25+ min on thin markets.
-# After 5 consecutive REST blocks, trust WS bid directly.
+# Max loss block counter: same logic for MAX_LOSS. After N consecutive REST blocks,
+# trust WS bid directly. N is configurable via MAX_LOSS_BYPASS_BLOCKS (default 2 — keep
+# cap responsive at small $ caps; raise if CLOB book lags less and false-close risk grows).
 _max_loss_blocks: dict = {}  # ws_key → int
+_MAX_LOSS_BYPASS_BLOCKS_DEFAULT = 2
 
 # Price history throttle: record tick only when price moves ≥0.3¢ or ≥30s since last record
 _price_last_recorded: dict = {}  # ws_key → (price, timestamp)
@@ -58,20 +61,80 @@ async def _fetch_market_data(http_client: httpx.AsyncClient, market_id: str):
     return r.json()
 
 
-async def _verify_price_and_volume(http_client: httpx.AsyncClient, market_id: str, side: str):
-    """Single REST call: fetch price + 24h volume + accepting_orders.
-    Returns (side_price, vol_24h, accepting_orders) or (None, None, True) on error.
-    accepting_orders=False means the market is paused/in maintenance — never close in this state.
-    Retries once on timeout/network error (critical for SL verification)."""
+@retry(stop=stop_after_attempt(2), wait=wait_fixed(1),
+       retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError, OSError)),
+       reraise=True)
+async def _fetch_clob_book(http_client: httpx.AsyncClient, token_id: str):
+    """Fetch live orderbook from CLOB API (real bids/asks, not Gamma midpoint)."""
+    r = await http_client.get(
+        f"https://clob.polymarket.com/book?token_id={token_id}", timeout=5,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _parse_clob_book(book: dict) -> tuple:
+    """Extract (best_bid, best_ask) from CLOB book response. 0 if missing."""
+    bids = book.get("bids") or []
+    asks = book.get("asks") or []
+    best_bid = max(
+        (float(b.get("price", 0)) for b in bids
+         if float(b.get("size", 0) or 0) > 0),
+        default=0.0,
+    )
+    best_ask = min(
+        (float(a.get("price", 0)) for a in asks
+         if float(a.get("size", 0) or 0) > 0),
+        default=0.0,
+    )
+    return best_bid, best_ask
+
+
+async def _verify_price_and_volume(http_client: httpx.AsyncClient, market_id: str,
+                                    side: str, token_id: str = None):
+    """Fetch live bid (CLOB book) + 24h volume + accepting_orders (Gamma) in parallel.
+    CLOB is source of truth for real-time price; Gamma midpoint lags 25+ min on thin markets.
+    Returns (side_price, vol_24h, accepting_orders). (None, None, True) on error.
+    For NO side: CLOB returns YES token book → NO bid = 1 - YES_ask.
+    Falls back to Gamma midpoint if CLOB unavailable (no token_id, fetch failure)."""
     if not http_client:
         return None, None, True
+
     try:
-        m = await _fetch_market_data(http_client, market_id)
-        accepting = bool(m.get("acceptingOrders", True))
-        yes_p, no_p = parse_outcome_prices(m)
-        price = no_p if side == "NO" else yes_p
-        vol_24h = float(m.get("volume24hr") or 0)
-        return round(price, 4) if price > 0 else None, vol_24h, accepting
+        market_task = _fetch_market_data(http_client, market_id)
+        if token_id:
+            book_task = _fetch_clob_book(http_client, token_id)
+            book, m = await asyncio.gather(book_task, market_task, return_exceptions=True)
+        else:
+            book = None
+            m = await market_task
+
+        # Gamma: accepting + volume (always required)
+        accepting = True
+        vol_24h = None
+        if not isinstance(m, Exception):
+            accepting = bool(m.get("acceptingOrders", True))
+            vol_24h = float(m.get("volume24hr") or 0)
+
+        # CLOB: live bid (preferred)
+        price = None
+        if book is not None and not isinstance(book, Exception):
+            best_bid, best_ask = _parse_clob_book(book)
+            if side == "NO":
+                if best_ask > 0:
+                    price = round(1.0 - best_ask, 4)
+            else:
+                if best_bid > 0:
+                    price = round(best_bid, 4)
+
+        # Fallback: Gamma midpoint (lagged but better than nothing)
+        if price is None and not isinstance(m, Exception):
+            yes_p, no_p = parse_outcome_prices(m)
+            mid = no_p if side == "NO" else yes_p
+            if mid > 0:
+                price = round(mid, 4)
+
+        return price, vol_24h, accepting
     except Exception as e:
         log.warning(f"[REST] Verify failed for {market_id[:8]}: {e}")
         return None, None, True
@@ -141,6 +204,10 @@ async def check_position_price(ws_key: str, price: float, info: dict,
     if bid_price <= 0:
         bid_price = price
 
+    # token_id is the YES outcome token; passed to REST verify so it hits CLOB book API
+    # (live bid/ask) instead of falling back to lagged Gamma midpoint.
+    token_id = info.get("token_id") or ws.prices.get(ws_key, {}).get("token_id")
+
     pnl_pct = (bid_price - entry_price) / entry_price if entry_price > 0 else 0
     pnl_dollar = pnl_pct * stake
     DB_WRITE_INTERVAL = 30
@@ -169,7 +236,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
     # ── Resolution: ≤1¢ (LOSS) ──
     if bid_price <= 0.01:
         # REST-verify before closing — WS can send 0 during platform maintenance/outage
-        rest_price, _, accepting = await _verify_price_and_volume(http_client, market_id, side)
+        rest_price, _, accepting = await _verify_price_and_volume(http_client, market_id, side, token_id)
         if not accepting:
             log.warning(f"[RESOLVED LOSS PAUSED] {market_id[:8]} market not accepting orders — holding during maintenance")
             return
@@ -212,7 +279,7 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         tp_cd_key = f"tp_{market_id}"
         if now_ts - _rest_cooldown.get(tp_cd_key, 0) >= _REST_COOLDOWN_SEC:
             _rest_cooldown[tp_cd_key] = now_ts
-            rest_price, _, accepting = await _verify_price_and_volume(http_client, market_id, side)
+            rest_price, _, accepting = await _verify_price_and_volume(http_client, market_id, side, token_id)
             if not accepting:
                 log.warning(f"[TAKE PROFIT PAUSED] {market_id[:8]} market not accepting orders — skipping during maintenance")
                 return
@@ -229,14 +296,15 @@ async def check_position_price(ws_key: str, price: float, info: dict,
 
     # ── Hard max loss cap — ALWAYS enforced ──
     max_loss = config["MAX_LOSS_PER_POS"]
+    bypass_thresh = int(config.get("MAX_LOSS_BYPASS_BLOCKS", _MAX_LOSS_BYPASS_BLOCKS_DEFAULT))
     if pnl_dollar <= -max_loss:
         ml_blocks = _max_loss_blocks.get(ws_key, 0)
-        if ml_blocks >= 5:
-            # REST has blocked 5 consecutive times — trust WS bid directly
+        if ml_blocks >= bypass_thresh:
+            # REST has blocked N consecutive times — trust WS bid directly
             log.info(f"[MAX LOSS] Bypassing REST after {ml_blocks} blocks — trusting WS bid={bid_price:.4f}")
             pnl_dollar = ((bid_price - entry_price) / entry_price) * stake
         else:
-            rest_price, _, accepting = await _verify_price_and_volume(http_client, market_id, side)
+            rest_price, _, accepting = await _verify_price_and_volume(http_client, market_id, side, token_id)
             if not accepting:
                 log.warning(f"[MAX LOSS PAUSED] {market_id[:8]} market not accepting orders — holding during maintenance")
                 return
@@ -248,6 +316,11 @@ async def check_position_price(ws_key: str, price: float, info: dict,
             if rest_pnl > -max_loss:
                 _max_loss_blocks[ws_key] = ml_blocks + 1
                 log.info(f"[MAX LOSS BLOCKED] {market_id[:8]} WS loss=${pnl_dollar:.2f} but REST=${rest_pnl:.2f} — not real (block #{ml_blocks+1})")
+                # Telemetry: persist the divergence so we can quantify how often REST lags.
+                try:
+                    await db.record_price_tick(market_id, side, rest_price, "max_loss_blocked")
+                except Exception:
+                    pass
                 return
             pnl_dollar = rest_pnl
         _max_loss_blocks.pop(ws_key, None)  # reset on close
@@ -344,11 +417,15 @@ async def rest_poll_stale_positions(open_positions: list,
 
     # Fetch all stale prices in parallel — then process sequentially to avoid
     # race conditions on shared pos_cache / ws.prices state.
-    import asyncio as _asyncio
-    prices = await _asyncio.gather(*[
-        _verify_price_and_volume(http_client, pos["market_id"], pos["side"])
+    prices = await asyncio.gather(*[
+        _verify_price_and_volume(
+            http_client, pos["market_id"], pos["side"],
+            ws.prices.get(f"{pos['market_id']}_{pos['side']}", {}).get("token_id"),
+        )
         for _, pos in stale
     ], return_exceptions=True)
+
+    max_loss = config.get("MAX_LOSS_PER_POS", 3.0)
 
     for (ws_key, pos), result in zip(stale, prices):
         if isinstance(result, Exception) or result[0] is None:
@@ -361,13 +438,26 @@ async def rest_poll_stale_positions(open_positions: list,
         # Record to price history so we can see the gap
         await db.record_price_tick(market_id, side, rest_price, "rest_poll")
         log.debug(f"[REST POLL] {ws_key} price={rest_price:.4f}")
-        # Inject into WS state so check_position_price uses REST price
-        if ws_key not in ws.prices:
-            ws.prices[ws_key] = {}
-        ws.prices[ws_key]["best_bid"] = rest_price
-        ws.prices[ws_key]["price"] = rest_price
-        ws.prices[ws_key]["last_update"] = now
-        # Run full exit logic with the REST price
+
+        # Reset only the staleness clock — do NOT clobber best_bid/price.
+        # Preserving WS-recorded values means a real WS-observed drop isn't erased
+        # by a (possibly lagged) REST midpoint. CLOB book API should be accurate now,
+        # but we still play it safe and pass rest_price explicitly via info dict below.
+        ws_info = ws.prices.get(ws_key)
+        if ws_info is not None:
+            ws_info["last_update"] = now
+
+        # If REST already shows loss past the cap, pre-increment the block counter so
+        # silent-WS positions can reach bypass_thresh after a few rest_poll cycles
+        # instead of being stuck waiting for WS ticks that never come.
+        entry_p = pos.get("entry_price", 0)
+        stake = pos.get("stake_amt", 0)
+        if entry_p > 0 and stake > 0:
+            rest_pnl = ((rest_price - entry_p) / entry_p) * stake
+            if rest_pnl <= -max_loss:
+                _max_loss_blocks[ws_key] = _max_loss_blocks.get(ws_key, 0) + 1
+
+        # Run full exit logic with the REST price (passed explicitly via info)
         await check_position_price(
             ws_key=ws_key, price=rest_price,
             info={"best_bid": rest_price},

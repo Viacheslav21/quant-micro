@@ -44,6 +44,7 @@ CONFIG = {
     "MAX_SPREAD":         float(os.getenv("MAX_SPREAD", "0.02")),
     "RESOLUTION_PRICE":   float(os.getenv("RESOLUTION_PRICE", "0.995")),
     "MAX_LOSS_PER_POS":   float(os.getenv("MAX_LOSS_PER_POS", "3.0")),
+    "MAX_LOSS_BYPASS_BLOCKS": int(os.getenv("MAX_LOSS_BYPASS_BLOCKS", "2")),
     "RAPID_DROP_PCT":     float(os.getenv("RAPID_DROP_PCT", "0.07")),
     "ENTRY_PRICE_1D":     float(os.getenv("ENTRY_PRICE_1D", "0.90")),
     "ENTRY_PRICE_2D":     float(os.getenv("ENTRY_PRICE_2D", "0.92")),
@@ -86,7 +87,7 @@ _last_daily_report_date: str = ""
 _SAFE_CONFIG_KEYS = {
     "ENTRY_MIN_PRICE", "WATCHLIST_MIN_PRICE", "MIN_ROI", "MIN_QUALITY_SCORE",
     "ENTRY_PRICE_1D", "ENTRY_PRICE_2D", "ENTRY_PRICE_3D",
-    "RAPID_DROP_PCT", "MAX_LOSS_PER_POS",
+    "RAPID_DROP_PCT", "MAX_LOSS_PER_POS", "MAX_LOSS_BYPASS_BLOCKS",
     "MAX_STAKE", "MIN_STAKE", "MAX_OPEN", "MAX_PER_THEME",
     "MAX_DAYS_LEFT", "MIN_VOLUME", "SCAN_INTERVAL", "CONFIG_TAG", "MAX_PER_NEG_RISK",
     "BANKROLL", "SLIPPAGE", "FEE_PCT",
