@@ -295,6 +295,17 @@ class TestThemeClassification(unittest.TestCase):
     def test_dota_is_esports(self):
         self.assertEqual(classify_theme("Dota 2: PARIVISION vs Nigma Galaxy - Game 1 Winner"), "esports")
 
+    def test_retail_gas_is_oil(self):
+        """Bug: 'gas' (gasoline retail) was falling into 'other' and pooling losses
+        with unrelated markets. Merged into 'oil' since natural gas/lng already there."""
+        self.assertEqual(classify_theme("Will gas hit (High) $4.25 by April 30?"), "oil")
+        self.assertEqual(classify_theme("Will gasoline drop below $3 by EOY?"), "oil")
+        self.assertEqual(classify_theme("Average per gallon price in California?"), "oil")
+
+    def test_las_vegas_still_sports(self):
+        """'gas' in 'Las Vegas' must NOT trigger oil — keep sports."""
+        self.assertEqual(classify_theme("Will Las Vegas Raiders win on 2026-04-30?"), "sports")
+
 
 # ── Shared utilities ──
 

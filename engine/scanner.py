@@ -121,7 +121,9 @@ THEME_KEYWORDS = {
                    "secretary of state","cabinet","impeach","pardon","classified","dhs"],
 
     # Commodities & markets
-    "oil":        ["oil","opec","crude","brent","wti","petroleum","natural gas","lng"],
+    "oil":        ["oil","opec","crude","brent","wti","petroleum","natural gas","lng",
+                   "gasoline","gas price","per gallon","gallon","propane","heating oil",
+                   "will gas hit","will gas reach","will gas drop"],
     "gold":       ["gold","xau","precious metal","silver","platinum"],
     "crypto":     ["bitcoin","btc","crypto","ethereum"," eth ","solana"," sol ","dogecoin","doge","xrp",
                    "ripple","cardano","polkadot","avalanche","chainlink","defi","nft","stablecoin",
