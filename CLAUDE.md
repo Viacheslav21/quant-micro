@@ -95,7 +95,7 @@ Polymarket API → Scanner (every 2 min, 1600 markets max)
 
 ### Configuration
 
-Config loaded from environment variables at startup, then overridden at runtime by `config_live` DB table (seeded by engine's `_seed_config_live`). `_reload_config()` merges DB overrides into the `CONFIG` dict (safe keys only, never credentials). Triggered instantly via `LISTEN config_reload` channel (auto-reconnects on connection loss). 25 micro parameters exposed for live editing in the dashboard:
+Config loaded from environment variables at startup, then overridden at runtime by `config_live` DB table. **Schema and seed are self-managed** — `db.init(micro_config=CONFIG)` calls `_ensure_config_live_tables()` (creates `config_live` + `config_live_history` if missing) and `_seed_config_live_micro()` (inserts the 25-row schema with `ON CONFLICT DO NOTHING`, preserving any DB overrides). This lets micro run standalone without quant-engine. `_reload_config()` merges DB overrides into the `CONFIG` dict (safe keys only, never credentials). Triggered instantly via `LISTEN config_reload` channel (auto-reconnects on connection loss). 25 micro parameters exposed for live editing in the dashboard:
 - **Signals**: `ENTRY_MIN_PRICE`, `WATCHLIST_MIN_PRICE`, `MIN_ROI`, `MIN_QUALITY_SCORE`, `ENTRY_PRICE_1D`, `ENTRY_PRICE_2D`, `ENTRY_PRICE_3D`
 - **Risk**: `RAPID_DROP_PCT`, `MAX_LOSS_PER_POS`, `MAX_LOSS_BYPASS_BLOCKS`
 - **Sizing**: `MAX_STAKE`, `MIN_STAKE`, `MAX_STAKE_Q80_6H`, `MAX_STAKE_Q80_1D`, `PCT_STAKE_Q80`

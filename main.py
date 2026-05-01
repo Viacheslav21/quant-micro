@@ -30,7 +30,7 @@ from utils.telegram import TelegramBot
 CONFIG = {
     "TELEGRAM_TOKEN":     os.getenv("TELEGRAM_BOT_TOKEN"),
     "TELEGRAM_CHAT_ID":   os.getenv("TELEGRAM_CHAT_ID"),
-    "BANKROLL":           float(os.getenv("BANKROLL", "500")),
+    "BANKROLL":           float(os.getenv("BANKROLL", "1000")),
     "SIMULATION":         os.getenv("SIMULATION", "true").lower() == "true",
     "SCAN_INTERVAL":      int(os.getenv("SCAN_INTERVAL", "120")),
     "MAX_STAKE":          float(os.getenv("MAX_STAKE", "20.0")),
@@ -191,7 +191,7 @@ async def main():
     log.info("[MAIN] quant-micro v3 starting — loading config from DB…")
 
     db = Database()
-    await db.init()
+    await db.init(micro_config=CONFIG)
 
     # Fresh start option
     if os.getenv("RESET_ON_START", "false").lower() == "true":

@@ -23,11 +23,13 @@ class Database:
         self.url = os.getenv("DATABASE_URL")
         self.pool: Optional[asyncpg.Pool] = None
 
-    async def init(self):
+    async def init(self, micro_config: dict = None):
         self.pool = await asyncpg.create_pool(
             self.url, min_size=1, max_size=5, command_timeout=30
         )
         await self._create_schema()
+        await self._ensure_config_live_tables()
+        await self._seed_config_live_micro(micro_config or {})
         log.info("[DB] PostgreSQL connected")
 
     async def _create_schema(self):
@@ -158,8 +160,106 @@ class Database:
             """)
         log.info("[DB] Schema ready")
 
+    async def _ensure_config_live_tables(self):
+        """Create config_live + config_live_history if missing.
+        Previously created by quant-engine; micro now self-bootstraps so it can run
+        standalone (engine deleted from deployment)."""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS config_live (
+                    id BIGSERIAL PRIMARY KEY,
+                    service TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    value_type TEXT NOT NULL DEFAULT 'str',
+                    description TEXT DEFAULT '',
+                    min_val REAL,
+                    max_val REAL,
+                    section TEXT DEFAULT 'general',
+                    version INTEGER DEFAULT 1,
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(service, key)
+                );
+                CREATE TABLE IF NOT EXISTS config_live_history (
+                    id BIGSERIAL PRIMARY KEY,
+                    service TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    old_value TEXT,
+                    new_value TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    changed_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_config_live_service ON config_live(service);
+            """)
+
+    # config_live schema for the 'micro' service (single source of truth).
+    # (key, fallback, value_type, description, min_val, max_val, section)
+    _MICRO_CONFIG_SCHEMA = [
+        # signals
+        ("ENTRY_MIN_PRICE",    0.94,  "float", "Base direct-buy threshold — above this → enter immediately (lowered for near-expiry)", 0.80, 0.99, "signals"),
+        ("WATCHLIST_MIN_PRICE",0.90,  "float", "Floor to subscribe via WS and wait for price to reach entry (4¢ below ENTRY_MIN_PRICE)", 0.80, 0.99, "signals"),
+        ("MIN_ROI",            0.02,  "float", "Min ROI at $1 payout = (1−price)/price (0.02 = 2%, floor after slippage/fees)", 0.005, 0.10, "signals"),
+        ("MIN_QUALITY_SCORE",  40,    "float", "Base quality gate 0–100 — stepped up by days_left (1–3d→55, 3–5d→70, >5d→80)", 0, 100, "signals"),
+        ("ENTRY_PRICE_1D",     0.90,  "float", "Entry threshold for markets expiring ≤1 day — cheaper = higher ROI at same cert.", 0.80, 0.99, "signals"),
+        ("ENTRY_PRICE_2D",     0.92,  "float", "Entry threshold for markets expiring ≤2 days", 0.80, 0.99, "signals"),
+        ("ENTRY_PRICE_3D",     0.93,  "float", "Entry threshold for markets expiring ≤3 days (>3d uses ENTRY_MIN_PRICE)", 0.80, 0.99, "signals"),
+        # risk
+        ("RAPID_DROP_PCT",     0.07,  "float", "Exit if bid drops this many ¢ from entry, absolute (0.07 = 7¢). REST+vol verified", 0.02, 0.15, "risk"),
+        ("MAX_LOSS_PER_POS",   3.0,   "float", "Hard $ cap per position — always enforced, REST-verified with retry", 0.5, 20.0, "risk"),
+        ("MAX_LOSS_BYPASS_BLOCKS", 2, "int",   "After N consecutive REST blocks of MAX_LOSS, trust WS bid directly. Lower = faster cap enforcement", 1, 10, "risk"),
+        # sizing
+        ("MAX_STAKE",          20.0,  "float", "Max $ per position (stake = 5% bankroll, capped here)", 1.0, 100.0, "sizing"),
+        ("MIN_STAKE",          5.0,   "float", "Min $ per position — skip entry if bankroll too low to meet this", 1.0, 50.0, "sizing"),
+        ("MAX_STAKE_Q80_6H",   75.0,  "float", "Cap $ for Q≥80 + ≤6h trades — 100% WR bucket, gets the highest Kelly stake", 5.0, 300.0, "sizing"),
+        ("MAX_STAKE_Q80_1D",   50.0,  "float", "Cap $ for Q≥80 + ≤1d trades — middle tier between Q80_6H ($75) and standard MAX_STAKE_1D ($35)", 5.0, 300.0, "sizing"),
+        ("PCT_STAKE_Q80",      0.075, "float", "Kelly fraction for Q≥80 tiers (vs 0.05 default) — bumped because WR is near 100%", 0.02, 0.20, "sizing"),
+        # capacity
+        ("MAX_OPEN",           50,    "int",   "Total open micro positions allowed", 1, 200, "capacity"),
+        ("MAX_PER_THEME",      5,     "int",   "Positions per theme — bypassed for negRisk (uses MAX_PER_NEG_RISK)", 1, 50, "capacity"),
+        ("MAX_PER_NEG_RISK",   3,     "int",   "Max positions per negRisk event group (correlated, ρ=1.0)", 1, 10, "capacity"),
+        # filters
+        ("MAX_DAYS_LEFT",      7,     "float", "Skip markets expiring > N days out (resolution harvesting horizon)", 1, 30, "filters"),
+        ("MIN_VOLUME",         50000, "float", "Skip markets with total volume below $N (illiquid = noisy)", 1000, 1e7, "filters"),
+        # timing
+        ("SCAN_INTERVAL",      120,   "int",   "Scanner loop in seconds. Positions monitored live via WS between scans", 30, 600, "timing"),
+        # sim
+        ("SLIPPAGE",           0.005, "float", "Sim entry slippage per side (0.005 = 0.5¢ added to fill price)", 0.0, 0.02, "sim"),
+        ("FEE_PCT",            0.02,  "float", "Sim round-trip fee on early exits as fraction of stake (0.02 = 2%)", 0.0, 0.10, "sim"),
+        # general
+        ("BANKROLL",           1000,  "float", "Starting bankroll $ — actual bankroll computed live from position PnL", 100, 10000, "general"),
+        ("CONFIG_TAG",         "micro-v4", "str", "Label saved on every position for A/B comparison", None, None, "general"),
+    ]
+
+    async def _seed_config_live_micro(self, micro_config: dict):
+        """Populate config_live with current env values for the 'micro' service.
+        ON CONFLICT DO NOTHING — existing DB values (manually edited via dashboard) untouched.
+        New rows get inserted with env values; later code reloads pick them up via NOTIFY."""
+
+        def _v(cfg, key, fallback):
+            val = cfg.get(key)
+            if val is None:
+                return str(fallback)
+            if isinstance(val, bool):
+                return "true" if val else "false"
+            return str(val)
+
+        async with self.pool.acquire() as conn:
+            inserted = 0
+            for key, fallback, vtype, desc, mn, mx, sec in self._MICRO_CONFIG_SCHEMA:
+                val = _v(micro_config, key, fallback)
+                result = await conn.execute("""
+                    INSERT INTO config_live (service, key, value, value_type, description, min_val, max_val, section)
+                    VALUES ('micro', $1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT (service, key) DO NOTHING
+                """, key, val, vtype, desc, mn, mx, sec)
+                if result.endswith(" 1"):  # "INSERT 0 1" if a row was actually inserted
+                    inserted += 1
+            log.info(f"[DB] config_live seeded for micro: {len(self._MICRO_CONFIG_SCHEMA)} schema rows ({inserted} new)")
+
     async def get_config_overrides(self, service: str) -> dict:
-        """Fetch live config overrides from config_live table (owned by engine)."""
+        """Fetch live config overrides from config_live table.
+        Schema + seed for the 'micro' service is owned by this module
+        (`_ensure_config_live_tables` + `_seed_config_live_micro`)."""
         try:
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
@@ -326,7 +426,7 @@ class Database:
 
     # ── Stats (computed from positions) ──
 
-    async def get_stats(self, starting_bankroll: float = 500.0) -> dict:
+    async def get_stats(self, starting_bankroll: float = 1000.0) -> dict:
         """Compute stats live from micro_positions. No separate stats table needed."""
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("""
@@ -521,7 +621,7 @@ class Database:
                 result[r["theme"]] = round(adj_wr, 4)
             return result
 
-    async def get_daily_report(self, starting_bankroll: float = 500.0) -> dict:
+    async def get_daily_report(self, starting_bankroll: float = 1000.0) -> dict:
         """Gather all data for daily telegram report in a single DB roundtrip."""
         async with self.pool.acquire() as conn:
             # Today's closed

@@ -31,7 +31,7 @@ if not os.getenv("DATABASE_URL"):
     load_dotenv(os.path.join(os.path.dirname(__file__), "..", "quant-ml", ".env"))
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-INITIAL_BANKROLL = 500.0
+INITIAL_BANKROLL = 1000.0
 
 # ── Current v5 rules ──
 
