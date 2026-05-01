@@ -1055,7 +1055,7 @@ check("non-esports 6h: still gets MAX_STAKE_6H", calc_stake(1000, cfg_dyn, days_
 # Q≥80 + ≤6h tier: bumped Kelly fraction (7.5%) and higher cap (MAX_STAKE_Q80_6H)
 # Production data: Q80+ is 100% WR (15/15) — undercapitalized at base 5%.
 cfg_q80 = {"MAX_STAKE": 20.0, "MIN_STAKE": 5.0, "MAX_STAKE_6H": 50.0, "MAX_STAKE_1D": 35.0,
-           "MAX_STAKE_Q80_6H": 75.0, "PCT_STAKE_Q80": 0.075}
+           "MAX_STAKE_Q80_6H": 75.0, "MAX_STAKE_Q80_1D": 50.0, "PCT_STAKE_Q80": 0.075}
 # Bankroll $1239 (~real prod): pct=7.5% → $93, capped at MAX_STAKE_Q80_6H=$75
 check("Q80+6h: bankroll $1239, 7.5%=$93 capped at $75", calc_stake(1239, cfg_q80, days_left=0.1, quality=80) == 75.0)
 check("Q80+6h: exact Q=80 boundary (≥80)", calc_stake(1239, cfg_q80, days_left=0.1, quality=80) == 75.0)
@@ -1063,8 +1063,12 @@ check("Q90+6h: same uplift", calc_stake(1239, cfg_q80, days_left=0.1, quality=95
 # Q79 must NOT trigger uplift — falls back to MAX_STAKE_6H
 check("Q79+6h: NOT uplifted, uses MAX_STAKE_6H=$50", calc_stake(1239, cfg_q80, days_left=0.1, quality=79) == 50.0)
 # Q80 but >6h: uses ≤1d/≥1d rules (not Q80 path)
-check("Q80 + 0.5d: uses MAX_STAKE_1D not Q80_6H", calc_stake(1239, cfg_q80, days_left=0.5, quality=85) == 35.0)
+check("Q80 + 0.5d: uses MAX_STAKE_Q80_1D ($50, pct binds at $93→$50)", calc_stake(1239, cfg_q80, days_left=0.5, quality=85) == 50.0)
+check("Q80 + 1.0d (boundary): uses MAX_STAKE_Q80_1D", calc_stake(1239, cfg_q80, days_left=1.0, quality=85) == 50.0)
 check("Q80 + 2d: uses MAX_STAKE", calc_stake(1239, cfg_q80, days_left=2.0, quality=90) == 20.0)
+check("Q79 + 0.5d: NO Q80 uplift, uses MAX_STAKE_1D=$35", calc_stake(1239, cfg_q80, days_left=0.5, quality=79) == 35.0)
+# Q80 + 1d tier — small bankroll: pct=7.5% binds before cap
+check("Q80 + 0.5d: bankroll $400, 7.5%=$30 (pct binds, > MIN)", calc_stake(400, cfg_q80, days_left=0.5, quality=85) == 30.0)
 # Q80+esports: esports rule wins (uplift disabled for esports regardless of quality)
 check("esports Q80+6h: still capped at MAX_STAKE", calc_stake(1239, cfg_q80, days_left=0.1, theme="esports", quality=90) == 20.0)
 # Lower bankroll: pct binds before cap

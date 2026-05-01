@@ -435,7 +435,7 @@ class Database:
 
     SHRINKAGE_K = 20  # Bayesian shrinkage strength toward global mean
     BLOCK_WR_THRESHOLD = 0.40  # block theme if adj WR < 40%
-    BLOCK_MIN_TRADES = 10  # need 10+ trades before blocking
+    BLOCK_MIN_TRADES = 5  # need 5+ trades before blocking — fast reaction on toxic themes
 
     async def recalibrate_theme(self, theme: str):
         """Recalculate theme block status from closed positions using Bayesian shrinkage."""

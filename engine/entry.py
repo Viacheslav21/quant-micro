@@ -28,11 +28,11 @@ def calc_stake(bankroll: float, config: dict, days_left: float = 99,
                theme: str = "", quality: float = 0) -> float:
     """Stake = N% of bankroll (default 5%), capped by MAX_STAKE.
     Near-expiry markets get a higher cap: ≤6h→MAX_STAKE_6H, ≤1d→MAX_STAKE_1D.
-    Q≥80 + ≤6h tier — best evidence-based bucket: production data shows Q80+
-    has 100% WR (15/15 trades, avg +$1.81), undercapitalized at base 5%.
-    Bumps Kelly fraction to PCT_STAKE_Q80 (default 7.5%) and uses MAX_STAKE_Q80_6H
-    as the hard cap. Rationale: shorter time + higher quality = lower variance =
-    Kelly says bet more.
+    Q≥80 tier — best evidence-based bucket: production data shows Q80+ has near-100%
+    WR, undercapitalized at base 5%. Two sub-tiers:
+      Q80 + ≤6h → MAX_STAKE_Q80_6H ($75), PCT_STAKE_Q80 (7.5%)
+      Q80 + ≤1d → MAX_STAKE_Q80_1D ($50), PCT_STAKE_Q80 (7.5%)
+    Rationale: shorter time + higher quality = lower variance = Kelly says bet more.
     Exception: esports — live matches can resolve 95¢→0¢ in minutes regardless
     of time-to-expiry/quality. Dynamic stake uplift does NOT apply."""
     if theme == "esports":
@@ -40,6 +40,12 @@ def calc_stake(bankroll: float, config: dict, days_left: float = 99,
         pct = 0.05
     elif quality >= 80 and days_left <= 0.25:
         max_s = config.get("MAX_STAKE_Q80_6H", 75.0)
+        pct = float(config.get("PCT_STAKE_Q80", 0.075))
+    elif quality >= 80 and days_left <= 1.0:
+        # Q≥80 + ≤1d — middle tier: same Kelly fraction as 6h, lower cap.
+        # Slightly more variance than ≤6h, so the cap (default $50) sits between
+        # MAX_STAKE_Q80_6H ($75) and the standard MAX_STAKE_1D ($35).
+        max_s = config.get("MAX_STAKE_Q80_1D", 50.0)
         pct = float(config.get("PCT_STAKE_Q80", 0.075))
     elif days_left <= 0.25:
         max_s = config.get("MAX_STAKE_6H", config["MAX_STAKE"] * 2.5)

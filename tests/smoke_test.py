@@ -146,6 +146,9 @@ check("SL blacklist includes rapid_drop", "'rapid_drop'" in src_db)
 check("NegRisk group check in entry", "neg_risk_group" in src_db)
 check("Atomic close: WHERE status='open'", "WHERE status='open'" in src_db or "status = 'open'" in src_db)
 check("Bayesian theme auto-block", "SHRINKAGE_K" in src_db)
+check("BLOCK_MIN_TRADES = 5 (fast reaction on toxic themes)", "BLOCK_MIN_TRADES = 5" in src_db)
+check("BLOCK_WR_THRESHOLD = 0.40", "BLOCK_WR_THRESHOLD = 0.40" in src_db)
+check("Q80 ≤1d tier in calc_stake", "MAX_STAKE_Q80_1D" in open('engine/entry.py').read())
 check("Bankroll computed from positions", "starting_bankroll + total_pnl" in src_db)
 
 
