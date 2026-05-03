@@ -157,7 +157,11 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         "neg_risk_id": neg_risk_id,
     }
 
-    await db.save_position_and_deduct(pos, stake)
+    inserted = await db.save_position_and_deduct(pos, stake)
+    if not inserted:
+        # Lost a race with a concurrent entry — the partial unique index caught it.
+        # Treat as duplicate so the caller's skip-counter logs it correctly.
+        return "duplicate"
     # Once it's a position we don't need the watchlist row anymore — drop it
     # (and its in-memory cache entry) so cleanup doesn't waste cycles on it
     # and the WS callback can't re-fire entry logic on the same key.

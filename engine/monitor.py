@@ -425,42 +425,46 @@ async def rest_poll_stale_positions(open_positions: list,
 
     max_loss = config.get("MAX_LOSS_PER_POS", 3.0)
 
-    for (ws_key, pos), result in zip(stale, prices):
-        if isinstance(result, Exception) or result[0] is None:
-            continue
-        rest_price, _, accepting = result
-        if not accepting:
-            log.warning(f"[REST POLL PAUSED] {pos['market_id'][:8]} market not accepting orders — skipping exit logic")
-            continue
-        market_id, side = pos["market_id"], pos["side"]
-        # Record to price history so we can see the gap
-        await db.record_price_tick(market_id, side, rest_price, "rest_poll")
-        log.debug(f"[REST POLL] {ws_key} price={rest_price:.4f}")
+    # Bound concurrency so a long stale list doesn't fan out to dozens of parallel
+    # CLOB+Gamma calls. Each ws_key is independent, so there are no shared-state
+    # races between concurrent _process_one() invocations: pos_cache/_max_loss_blocks
+    # are keyed per ws_key and recalibrate_theme uses an atomic upsert.
+    sem = asyncio.Semaphore(5)
 
-        # Reset only the staleness clock — do NOT clobber best_bid/price.
-        # Preserving WS-recorded values means a real WS-observed drop isn't erased
-        # by a (possibly lagged) REST midpoint. CLOB book API should be accurate now,
-        # but we still play it safe and pass rest_price explicitly via info dict below.
-        ws_info = ws.prices.get(ws_key)
-        if ws_info is not None:
-            ws_info["last_update"] = now
+    async def _process_one(ws_key, pos, result):
+        async with sem:
+            if isinstance(result, Exception) or result[0] is None:
+                return
+            rest_price, _, accepting = result
+            if not accepting:
+                log.warning(f"[REST POLL PAUSED] {pos['market_id'][:8]} market not accepting orders — skipping exit logic")
+                return
+            market_id, side = pos["market_id"], pos["side"]
+            await db.record_price_tick(market_id, side, rest_price, "rest_poll")
+            log.debug(f"[REST POLL] {ws_key} price={rest_price:.4f}")
 
-        # If REST already shows loss past the cap, pre-increment the block counter so
-        # silent-WS positions can reach bypass_thresh after a few rest_poll cycles
-        # instead of being stuck waiting for WS ticks that never come.
-        entry_p = pos.get("entry_price", 0)
-        stake = pos.get("stake_amt", 0)
-        if entry_p > 0 and stake > 0:
-            rest_pnl = ((rest_price - entry_p) / entry_p) * stake
-            if rest_pnl <= -max_loss:
-                _max_loss_blocks[ws_key] = _max_loss_blocks.get(ws_key, 0) + 1
+            ws_info = ws.prices.get(ws_key)
+            if ws_info is not None:
+                ws_info["last_update"] = now
 
-        # Run full exit logic with the REST price (passed explicitly via info)
-        await check_position_price(
-            ws_key=ws_key, price=rest_price,
-            info={"best_bid": rest_price},
-            db=db, ws=ws, tg=tg, config=config,
-            http_client=http_client,
-            pos_cache=pos_cache, pos_last_db_write=pos_last_db_write,
-            shutdown=shutdown,
-        )
+            entry_p = pos.get("entry_price", 0)
+            stake = pos.get("stake_amt", 0)
+            if entry_p > 0 and stake > 0:
+                rest_pnl = ((rest_price - entry_p) / entry_p) * stake
+                if rest_pnl <= -max_loss:
+                    _max_loss_blocks[ws_key] = _max_loss_blocks.get(ws_key, 0) + 1
+
+            await check_position_price(
+                ws_key=ws_key, price=rest_price,
+                info={"best_bid": rest_price},
+                db=db, ws=ws, tg=tg, config=config,
+                http_client=http_client,
+                pos_cache=pos_cache, pos_last_db_write=pos_last_db_write,
+                shutdown=shutdown,
+            )
+
+    await asyncio.gather(
+        *[_process_one(ws_key, pos, result)
+          for (ws_key, pos), result in zip(stale, prices)],
+        return_exceptions=True,
+    )

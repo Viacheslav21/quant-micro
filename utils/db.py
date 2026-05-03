@@ -118,6 +118,21 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_micro_pos_neg_risk
                     ON micro_positions(neg_risk_id) WHERE neg_risk_id IS NOT NULL;
             """)
+            # Hard guard against duplicate open positions on the same (market_id, side).
+            # check_entry_allowed has a TOCTOU window — two concurrent try_enter calls
+            # (scan + WS callback) can both see has_open=False and both INSERT.
+            # CREATE UNIQUE INDEX CONCURRENTLY isn't allowed inside a transaction, but
+            # we're not in one here. Skip if duplicates already exist (would fail).
+            try:
+                await conn.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_micro_pos_open_unique
+                        ON micro_positions(market_id, side) WHERE status = 'open';
+                """)
+            except asyncpg.exceptions.UniqueViolationError as e:
+                log.warning(
+                    "[DB] Cannot create unique index on open positions — duplicates exist. "
+                    f"Manually dedupe and retry. {e}"
+                )
             # Add neg_risk_id to watchlist for correlated position grouping
             await conn.execute("""
                 ALTER TABLE micro_watchlist ADD COLUMN IF NOT EXISTS neg_risk_id TEXT DEFAULT NULL;
@@ -372,22 +387,31 @@ class Database:
 
     # ── Positions ──
 
-    async def save_position_and_deduct(self, pos: dict, stake: float):
-        """Save position. Bankroll computed from positions, no separate stats update needed."""
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO micro_positions
-                    (id, market_id, question, theme, side, entry_price,
-                     current_price, stake_amt, config_tag, end_date, neg_risk_id)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-            """,
-                pos["id"], pos["market_id"], pos["question"],
-                pos.get("theme", "other"), pos["side"], pos["entry_price"],
-                pos["entry_price"], pos["stake_amt"],
-                pos.get("config_tag", "micro-v3"),
-                pos.get("end_date"),
-                pos.get("neg_risk_id"),
+    async def save_position_and_deduct(self, pos: dict, stake: float) -> bool:
+        """Save position. Returns False if a duplicate open position already exists
+        (caught via the partial unique index on (market_id, side) WHERE status='open').
+        Bankroll is computed live from positions — no separate stats update needed."""
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO micro_positions
+                        (id, market_id, question, theme, side, entry_price,
+                         current_price, stake_amt, config_tag, end_date, neg_risk_id)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                """,
+                    pos["id"], pos["market_id"], pos["question"],
+                    pos.get("theme", "other"), pos["side"], pos["entry_price"],
+                    pos["entry_price"], pos["stake_amt"],
+                    pos.get("config_tag", "micro-v3"),
+                    pos.get("end_date"),
+                    pos.get("neg_risk_id"),
+                )
+            return True
+        except asyncpg.exceptions.UniqueViolationError:
+            log.warning(
+                f"[DB] Duplicate open position blocked: {pos['market_id'][:8]} {pos['side']}"
             )
+            return False
 
     async def get_open_position_by_market(self, market_id: str, side: str) -> Optional[dict]:
         """Fast single-position lookup for WS callbacks (avoids full table scan)."""
@@ -500,15 +524,19 @@ class Database:
     # ── Cleanup ──
 
     async def cleanup_watchlist(self):
-        """Remove markets that left the watchlist zone, expired, or went stale."""
+        """Remove markets that left the watchlist zone, expired, or went stale.
+        end_date is TEXT — guard the cast with a regex CASE so a malformed value
+        doesn't abort the whole DELETE transaction."""
         async with self.pool.acquire() as conn:
             deleted = await conn.execute("""
                 DELETE FROM micro_watchlist
                 WHERE yes_price < 0.75 OR yes_price > 0.98
                     OR updated_at < NOW() - INTERVAL '3 days'
-                    OR (end_date IS NOT NULL
-                        AND end_date <> ''
-                        AND end_date::timestamptz < NOW())
+                    OR CASE
+                        WHEN end_date ~ '^\\d{4}-\\d{2}-\\d{2}'
+                            THEN end_date::timestamptz < NOW()
+                        ELSE FALSE
+                       END
             """)
             log.debug(f"[DB] Watchlist cleanup: {deleted}")
 

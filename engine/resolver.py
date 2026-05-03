@@ -144,7 +144,20 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot,
         if not pos.get("_is_expired") or hours_past < 72:
             continue
 
-        current_price = pos.get("current_price", entry_price)
+        # Prefer the REST price we just fetched; fall back to last WS price; then entry.
+        # Using entry_price as fallback would write PnL=0 even if the real exit was -100%.
+        current_price = entry_price
+        if mdata:
+            try:
+                yes_p, no_p = parse_outcome_prices(mdata)
+                rest_side = yes_p if side == "YES" else no_p
+                if rest_side > 0:
+                    current_price = rest_side
+            except Exception:
+                pass
+        if current_price == entry_price:
+            current_price = pos.get("current_price") or entry_price
+
         pnl = ((current_price - entry_price) / entry_price) * stake
         result = "WIN" if pnl >= 0 else "LOSS"
         closed = await db.close_position(pos["id"], round(pnl, 4), result, "expired",

@@ -307,7 +307,8 @@ async def main():
                     f"Scan #{_scan_count_global} | WS={'connected' if ws.ws else 'DISCONNECTED'}"
                 )
                 _last_scan_at = time.time()
-    asyncio.create_task(_watchdog())
+    # Hold a strong reference so the task can't be GC'd, and so we can cancel on exit.
+    watchdog_task = asyncio.create_task(_watchdog())
 
     # ── Health endpoint (lightweight asyncio, no aiohttp) ──
     async def _health_handler(reader, writer):
@@ -343,19 +344,29 @@ async def main():
     async def _listen_config():
         import asyncpg as _apg
         while not _shutdown:
+            conn = None
             try:
                 conn = await _apg.connect(db.url)
                 await conn.add_listener("config_reload",
                     lambda c, pid, ch, payload: asyncio.create_task(_reload_config(db)))
                 await conn.execute("LISTEN config_reload")
                 log.info("[CONFIG] LISTEN config_reload active")
+                # Heartbeat: SELECT 1 every 60s. Without this, asyncpg has no way to
+                # notice a silently-dropped TCP connection (NAT/idle timeouts) and we
+                # stop receiving NOTIFY without ever erroring out.
                 while not _shutdown:
                     await asyncio.sleep(60)
-                await conn.close()
+                    await conn.execute("SELECT 1")
             except Exception as e:
                 log.warning(f"[CONFIG] LISTEN failed: {e}, reconnecting in 10s")
                 await asyncio.sleep(10)
-    asyncio.create_task(_listen_config())
+            finally:
+                if conn is not None:
+                    try:
+                        await conn.close()
+                    except Exception:
+                        pass
+    listen_task = asyncio.create_task(_listen_config())
 
     # ── Scan Loop ──
     _SCAN_TIMEOUT = 600
@@ -494,7 +505,11 @@ async def main():
     # ── Shutdown ──
     log.info("[MAIN] Shutting down...")
     await ws.stop()
-    ws_task.cancel()
+    for t in (ws_task, watchdog_task, listen_task):
+        t.cancel()
+    # Drain cancellations before tearing down DB/HTTP — otherwise the LISTEN
+    # task can spew "[CONFIG] LISTEN failed: pool is closed" after Goodbye.
+    await asyncio.gather(ws_task, watchdog_task, listen_task, return_exceptions=True)
     await scanner.close()
     await tg.send("<b>quant-micro stopped</b>")
     await tg.close()

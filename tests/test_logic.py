@@ -47,6 +47,7 @@ class MockDB:
 
     async def save_position_and_deduct(self, pos, stake):
         self.saved.append(pos)
+        return True
 
     async def upsert_watchlist(self, candidate):
         self.upserted.append(candidate)
