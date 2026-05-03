@@ -545,10 +545,11 @@ class Database:
 
     async def cleanup_price_history(self, days: int = 3):
         """Delete price history older than N days to avoid unbounded growth."""
+        from datetime import timedelta
         async with self.pool.acquire() as conn:
             deleted = await conn.execute(
                 "DELETE FROM micro_price_history WHERE ts < NOW() - $1::interval",
-                f"{days} days",
+                timedelta(days=days),
             )
             log.debug(f"[DB] Price history cleanup: {deleted}")
 
