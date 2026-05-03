@@ -625,14 +625,15 @@ class MicroScanner:
                         else:
                             best_bid_yes = float(m.get("bestBid") or yes_price)
                             no_best_ask = round(1.0 - best_bid_yes, 4)
-                            # Always subscribe to YES token; ws_client inverts for NO
+                            # NO side subscribes to its own NO token — independent
+                            # orderbook, no inversion needed.
                             candidates_for_market.append({
                                 "side": "NO",
                                 "price": no_price,
                                 "best_ask": no_best_ask,
                                 "roi": roi,
                                 "quality": q,
-                                "ws_token": yes_token,
+                                "ws_token": no_token,
                                 "ws_side": "no",
                             })
 

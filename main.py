@@ -213,18 +213,22 @@ async def main():
 
     ws.set_callbacks(on_watchlist_price=on_watchlist, on_position_price=on_position)
 
-    # Restore open positions into WS
+    # Restore open positions into WS — each side subscribes to its native token
     open_pos = await db.get_open_positions()
     restored = 0
     wl_all = await db.get_watchlist()
-    wl_tokens = {w["market_id"]: w.get("yes_token") for w in wl_all if w.get("yes_token")}
+    wl_tokens = {
+        w["market_id"]: (w.get("yes_token"), w.get("no_token"))
+        for w in wl_all
+        if w.get("yes_token") or w.get("no_token")
+    }
 
     needs_fetch = []
-    pos_tokens = {}
+    pos_tokens: dict = {}  # market_id -> (yes_token, no_token)
     for pos in open_pos:
-        token_id = wl_tokens.get(pos["market_id"])
-        if token_id:
-            pos_tokens[pos["market_id"]] = token_id
+        toks = wl_tokens.get(pos["market_id"])
+        if toks and toks[0] and toks[1]:
+            pos_tokens[pos["market_id"]] = toks
         else:
             needs_fetch.append(pos["market_id"])
 
@@ -236,21 +240,24 @@ async def main():
                     tids = r.json().get("clobTokenIds") or []
                     if isinstance(tids, str):
                         tids = json.loads(tids)
-                    return mid, tids[0] if tids else None
+                    yes_tok = tids[0] if len(tids) > 0 else None
+                    no_tok = tids[1] if len(tids) > 1 else None
+                    return mid, (yes_tok, no_tok)
             except Exception:
                 pass
-            return mid, None
+            return mid, (None, None)
 
         results = await asyncio.gather(*[_fetch_token(mid) for mid in needs_fetch])
-        for mid, token_id in results:
-            if token_id:
-                pos_tokens[mid] = token_id
-                log.info(f"[RESTORE] Fetched YES token for {mid[:8]} from API")
+        for mid, toks in results:
+            if toks[0] and toks[1]:
+                pos_tokens[mid] = toks
+                log.info(f"[RESTORE] Fetched YES+NO tokens for {mid[:8]} from API")
 
     for pos in open_pos:
         side = pos.get("side", "YES")
         ws_key = f"{pos['market_id']}_{side}"
-        token_id = pos_tokens.get(pos["market_id"])
+        toks = pos_tokens.get(pos["market_id"])
+        token_id = (toks[1] if side == "NO" else toks[0]) if toks else None
         if token_id:
             ws.register_market(ws_key, token_id=token_id, token_side=side.lower(),
                                price=pos.get("entry_price", 0.9), question=pos.get("question", ""),

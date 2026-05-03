@@ -21,13 +21,11 @@ class FakeWS:
     def __init__(self):
         self._subscribed_tokens: set = set()
         self._token_to_keys: dict[str, list[str]] = {}
-        self._key_invert: dict[str, bool] = {}
         self.prices: dict[str, dict] = {}
 
     def register_market(self, ws_key, token_id=None, token_side="yes", price=0.5):
         tokens_to_add = []
         if token_id:
-            self._key_invert[ws_key] = (token_side == "no")
             if token_id not in self._subscribed_tokens:
                 self._token_to_keys[token_id] = [ws_key]
                 self._subscribed_tokens.add(token_id)
@@ -42,7 +40,6 @@ class FakeWS:
     def unregister_market(self, ws_key):
         tokens_to_remove = []
         info = self.prices.pop(ws_key, None)
-        self._key_invert.pop(ws_key, None)
         if not info:
             return tokens_to_remove
         token_id = info.get("token_id")
@@ -56,68 +53,38 @@ class FakeWS:
                 tokens_to_remove.append(token_id)
         return tokens_to_remove
 
-    def _side_price(self, ws_key, raw_price):
-        if self._key_invert.get(ws_key, False):
-            return round(1.0 - raw_price, 4)
-        return raw_price
-
 
 class TestWsMultiKeyMapping(unittest.TestCase):
-    def test_register_yes_and_no_same_token(self):
-        ws = FakeWS()
-        t1 = ws.register_market("mkt_YES", token_id="tok", token_side="yes", price=0.95)
-        t2 = ws.register_market("mkt_NO", token_id="tok", token_side="no", price=0.05)
-        self.assertEqual(t1, ["tok"])
-        self.assertEqual(t2, [])
-        self.assertIn("mkt_YES", ws._token_to_keys["tok"])
-        self.assertIn("mkt_NO", ws._token_to_keys["tok"])
+    """YES and NO sides now subscribe to their own native tokens. Multi-key
+    mapping is still tested for the rare case where two ws_keys share a token."""
 
-    def test_invert_per_key(self):
+    def test_register_separate_tokens(self):
         ws = FakeWS()
-        ws.register_market("mkt_YES", token_id="tok", token_side="yes")
-        ws.register_market("mkt_NO", token_id="tok", token_side="no")
-        self.assertFalse(ws._key_invert["mkt_YES"])
-        self.assertTrue(ws._key_invert["mkt_NO"])
+        t1 = ws.register_market("mkt_YES", token_id="tok_yes", token_side="yes", price=0.95)
+        t2 = ws.register_market("mkt_NO", token_id="tok_no", token_side="no", price=0.95)
+        self.assertEqual(t1, ["tok_yes"])
+        self.assertEqual(t2, ["tok_no"])
+        self.assertIn("mkt_YES", ws._token_to_keys["tok_yes"])
+        self.assertIn("mkt_NO", ws._token_to_keys["tok_no"])
 
-    def test_unregister_one_keeps_token(self):
+    def test_unregister_releases_token(self):
         ws = FakeWS()
-        ws.register_market("mkt_YES", token_id="tok", token_side="yes")
-        ws.register_market("mkt_NO", token_id="tok", token_side="no")
+        ws.register_market("mkt_YES", token_id="tok_yes", token_side="yes")
+        ws.register_market("mkt_NO", token_id="tok_no", token_side="no")
         unsub = ws.unregister_market("mkt_YES")
-        self.assertEqual(unsub, [])
+        self.assertEqual(unsub, ["tok_yes"])
+        self.assertIn("tok_no", ws._subscribed_tokens)
+
+    def test_multi_key_same_token_kept_after_partial_unregister(self):
+        """Data structure must support multiple ws_keys per token (unusual but legal)."""
+        ws = FakeWS()
+        ws.register_market("a", token_id="tok", token_side="yes")
+        ws.register_market("b", token_id="tok", token_side="yes")
+        unsub = ws.unregister_market("a")
+        self.assertEqual(unsub, [])  # b still using it
         self.assertIn("tok", ws._subscribed_tokens)
-
-    def test_unregister_both_removes_token(self):
-        ws = FakeWS()
-        ws.register_market("mkt_YES", token_id="tok", token_side="yes")
-        ws.register_market("mkt_NO", token_id="tok", token_side="no")
-        ws.unregister_market("mkt_YES")
-        unsub = ws.unregister_market("mkt_NO")
+        unsub = ws.unregister_market("b")
         self.assertEqual(unsub, ["tok"])
-        self.assertNotIn("tok", ws._subscribed_tokens)
-
-    def test_side_price_inversion(self):
-        ws = FakeWS()
-        ws.register_market("mkt_YES", token_id="tok", token_side="yes")
-        ws.register_market("mkt_NO", token_id="tok", token_side="no")
-        self.assertAlmostEqual(ws._side_price("mkt_YES", 0.95), 0.95)
-        self.assertAlmostEqual(ws._side_price("mkt_NO", 0.95), 0.05)
-
-    def test_price_dispatch_to_both_keys(self):
-        """Simulate a price event updating both YES and NO ws_keys."""
-        ws = FakeWS()
-        ws.register_market("mkt_YES", token_id="tok", token_side="yes", price=0.90)
-        ws.register_market("mkt_NO", token_id="tok", token_side="no", price=0.10)
-
-        # Simulate what _handle_price does: iterate over ws_keys for token
-        raw = 0.92
-        for ws_key in ws._token_to_keys.get("tok", []):
-            info = ws.prices.get(ws_key)
-            if info:
-                info["price"] = ws._side_price(ws_key, raw)
-
-        self.assertAlmostEqual(ws.prices["mkt_YES"]["price"], 0.92)
-        self.assertAlmostEqual(ws.prices["mkt_NO"]["price"], 0.08)
 
 
 # ── Bug #8: NO price from raw_prices[1] ──
@@ -224,8 +191,8 @@ class TestWsPriceSync(unittest.TestCase):
         """price_change event should update best_bid (authoritative source)."""
         ws = self._make_ws()
         info = ws.prices["mkt_YES"]
-        # Simulate _handle_price setting price + best_bid
-        new_price = ws._side_price("mkt_YES", 0.88)
+        # Simulate _handle_price: native token, no inversion
+        new_price = 0.88
         info["price"] = new_price
         info["best_bid"] = new_price  # this is the fix
         self.assertAlmostEqual(info["best_bid"], 0.88)

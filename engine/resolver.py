@@ -203,7 +203,7 @@ async def check_event_cascade(scanner, db: Database, ws: MicroWS, tg: TelegramBo
                 "quality": 95,
                 "yes_token": s["yes_token"],
                 "no_token": s["no_token"],
-                "ws_token": s["yes_token"],
+                "ws_token": s["no_token"],
                 "ws_side": "no",
                 "neg_risk_id": neg_risk_id,
             }

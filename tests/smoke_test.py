@@ -188,7 +188,7 @@ check("Exit fee applied in monitor (SL/rapid/max)", "calc_exit_fee" in src_monit
 # ── 8b. WS Price Sync ──
 print("\n\033[1m8b. WS Price Sync\033[0m")
 
-check("price_change syncs best_bid", 'info["best_bid"] = new_price' in src_ws)
+check("price_change syncs best_bid", 'info["best_bid"] = raw' in src_ws)
 check("Book updates best_bid directly", 'info["best_bid"] = raw_best_bid' in src_ws)
 check("Shared parses outcome prices", "parse_outcome_prices" in src_shared and "raw[1]" in src_shared)
 
@@ -212,7 +212,8 @@ print("\n\033[1m10. WS Client\033[0m")
 check("Auto-reconnect", "reconnect" in src_ws.lower() or "RECONNECT_DELAY" in src_ws)
 check("Heartbeat", "PING" in src_ws or "heartbeat" in src_ws.lower())
 check("Batch subscribe", "batch" in src_ws.lower() or "100" in src_ws)
-check("NO side price inversion", "1.0 -" in src_ws or "1 -" in src_ws)
+check("Native side token (no inversion)", "_key_invert" not in src_ws and "_side_price" not in src_ws,
+      "NO side now subscribes to NO token directly — inversion logic removed")
 
 
 # ── 11. Theme Quality Adjustment ──

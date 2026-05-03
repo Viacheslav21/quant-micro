@@ -18,17 +18,18 @@ WATCHLIST_CHECK_INTERVAL = 2.0
 class MicroWS:
     """WebSocket client: watchlist price-up detection + position SL/resolution.
 
-    Each tracked entry is keyed by ws_key (e.g. "market_id_YES" or "market_id_NO").
-    ALWAYS subscribes to the YES token. For NO side, prices are inverted
-    (price = 1 - yes_token_price) so all callbacks see the correct side price.
+    Each tracked entry is keyed by ws_key (e.g. "market_id_YES" or "market_id_NO")
+    and is subscribed to its OWN side's token (YES side → YES token, NO side → NO
+    token). Each side has an independent orderbook on Polymarket; subscribing
+    natively avoids the case where one side's book goes thin and we lose price
+    visibility on the other side via inversion.
     """
 
     def __init__(self):
         self.ws = None
         self._running = False
         self._subscribed_tokens: set = set()
-        self._token_to_keys: dict[str, list[str]] = {}  # token_id -> [ws_key, ...] (one token can serve YES + NO)
-        self._key_invert: dict[str, bool] = {}           # ws_key -> True if NO side (invert price)
+        self._token_to_keys: dict[str, list[str]] = {}  # token_id -> [ws_key, ...]
         self.prices: dict[str, dict] = {}                # ws_key -> {price, best_bid, best_ask, ...}
         self._last_watchlist_check: dict[str, float] = {}
 
@@ -42,11 +43,14 @@ class MicroWS:
     def register_market(self, ws_key: str, token_id: str = None,
                         token_side: str = "yes", price: float = 0.5,
                         question: str = "", is_position: bool = False) -> list:
-        """Register a single side for tracking. Returns tokens to subscribe."""
+        """Register a single side for tracking. Returns tokens to subscribe.
+
+        token_side is accepted for backward compatibility with callers but is no
+        longer used — each side now subscribes to its native token directly.
+        """
         tokens_to_add = []
 
         if token_id:
-            self._key_invert[ws_key] = (token_side == "no")
             if token_id not in self._subscribed_tokens:
                 self._token_to_keys[token_id] = [ws_key]
                 self._subscribed_tokens.add(token_id)
@@ -72,7 +76,6 @@ class MicroWS:
     def unregister_market(self, ws_key: str) -> list:
         tokens_to_remove = []
         info = self.prices.pop(ws_key, None)
-        self._key_invert.pop(ws_key, None)
         if not info:
             return tokens_to_remove
         token_id = info.get("token_id")
@@ -241,12 +244,6 @@ class MicroWS:
         elif event_type == "book":
             await self._handle_book(data)
 
-    def _side_price(self, ws_key: str, raw_price: float) -> float:
-        """Convert raw token price to the side's price (invert if NO)."""
-        if self._key_invert.get(ws_key, False):
-            return round(1.0 - raw_price, 4)
-        return raw_price
-
     async def _handle_price(self, data):
         token_id = data.get("asset_id", "")
         ws_keys = self._token_to_keys.get(token_id)
@@ -262,10 +259,8 @@ class MicroWS:
             if not info:
                 continue
 
-            new_price = self._side_price(ws_key, raw)
-
-            info["price"] = new_price
-            info["best_bid"] = new_price
+            info["price"] = raw
+            info["best_bid"] = raw
             info["last_update"] = time.time()
             await self._dispatch(ws_key, info)
 
@@ -298,21 +293,12 @@ class MicroWS:
             if not info:
                 continue
 
-            invert = self._key_invert.get(ws_key, False)
+            old_bid = info.get("best_bid", 0)
 
-            if not invert:
-                if raw_best_bid > 0:
-                    info["best_bid"] = raw_best_bid
-                if raw_best_ask > 0:
-                    info["best_ask"] = raw_best_ask
-            else:
-                # NO side: subscribed to YES token, invert to get NO prices
-                # NO bid = 1 - YES ask (what we'd get selling NO)
-                # NO ask = 1 - YES bid (what we'd pay buying NO)
-                if raw_best_ask > 0:
-                    info["best_bid"] = round(1.0 - raw_best_ask, 4)
-                if raw_best_bid > 0:
-                    info["best_ask"] = round(1.0 - raw_best_bid, 4)
+            if raw_best_bid > 0:
+                info["best_bid"] = raw_best_bid
+            if raw_best_ask > 0:
+                info["best_ask"] = raw_best_ask
 
             # Sanity check: bid/ask must be in valid range
             bid = info.get("best_bid", 0)
@@ -322,5 +308,12 @@ class MicroWS:
             if ask <= 0.001 or ask >= 1.0:
                 info["best_ask"] = info.get("price", 0)
 
-            info["last_update"] = time.time()
-            await self._dispatch(ws_key, info)
+            new_bid = info.get("best_bid", 0)
+
+            # Only refresh staleness clock + dispatch on a real bid movement.
+            # Book reshuffles that don't move the top of book leave last_update
+            # stale, so rest_poll_stale_positions can still kick in if WS goes
+            # quiet on actual price changes.
+            if abs(new_bid - old_bid) >= 0.0001:
+                info["last_update"] = time.time()
+                await self._dispatch(ws_key, info)
