@@ -453,8 +453,8 @@ async def main():
         # 8. Daily report (once per day, first scan after midnight UTC)
         await _send_daily_report(db, tg, CONFIG)
 
-        # 9. Cleanup stale WS (every 30 scans)
-        if scan_count > 0 and scan_count % 30 == 0:
+        # 9. Cleanup stale WS (every 10 scans, ~20 min)
+        if scan_count > 0 and scan_count % 10 == 0:
             await db.cleanup_watchlist()
             wl_data = await db.get_watchlist()
             wl_ids = {w["market_id"] for w in wl_data}

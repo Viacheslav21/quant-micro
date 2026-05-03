@@ -51,6 +51,9 @@ class MockDB:
     async def upsert_watchlist(self, candidate):
         self.upserted.append(candidate)
 
+    async def remove_from_watchlist(self, market_id, side=None):
+        pass
+
     async def close_position(self, pos_id, pnl, result, reason, exit_price=None):
         self.closed.append({"id": pos_id, "pnl": pnl, "result": result, "reason": reason, "exit_price": exit_price})
         return True

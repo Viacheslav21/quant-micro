@@ -90,6 +90,10 @@ class Database:
                     ON micro_positions(market_id, side, status);
                 CREATE INDEX IF NOT EXISTS idx_micro_watchlist_price
                     ON micro_watchlist(yes_price DESC);
+                CREATE INDEX IF NOT EXISTS idx_micro_watchlist_updated_at
+                    ON micro_watchlist(updated_at);
+                CREATE INDEX IF NOT EXISTS idx_micro_watchlist_end_date
+                    ON micro_watchlist(end_date) WHERE end_date IS NOT NULL;
 
             """)
             # Migrations — add new columns
@@ -341,11 +345,18 @@ class Database:
             )
             return [dict(r) for r in rows]
 
-    async def remove_from_watchlist(self, market_id: str):
+    async def remove_from_watchlist(self, market_id: str, side: str = None):
+        """Delete one (market_id, side) row, or both sides if side is None."""
         async with self.pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM micro_watchlist WHERE market_id = $1", market_id
-            )
+            if side:
+                await conn.execute(
+                    "DELETE FROM micro_watchlist WHERE market_id = $1 AND side = $2",
+                    market_id, side,
+                )
+            else:
+                await conn.execute(
+                    "DELETE FROM micro_watchlist WHERE market_id = $1", market_id
+                )
 
     async def get_watchlist_market(self, market_id: str, side: str = None) -> Optional[dict]:
         async with self.pool.acquire() as conn:
@@ -489,12 +500,15 @@ class Database:
     # ── Cleanup ──
 
     async def cleanup_watchlist(self):
-        """Remove markets that left the watchlist zone or went stale."""
+        """Remove markets that left the watchlist zone, expired, or went stale."""
         async with self.pool.acquire() as conn:
             deleted = await conn.execute("""
                 DELETE FROM micro_watchlist
                 WHERE yes_price < 0.75 OR yes_price > 0.98
                     OR updated_at < NOW() - INTERVAL '3 days'
+                    OR (end_date IS NOT NULL
+                        AND end_date <> ''
+                        AND end_date::timestamptz < NOW())
             """)
             log.debug(f"[DB] Watchlist cleanup: {deleted}")
 

@@ -18,10 +18,16 @@ _wl_cache: dict = {}
 
 
 def update_watchlist_cache(items: list):
-    """Refresh in-memory watchlist cache from latest batch upsert."""
+    """Refresh in-memory watchlist cache from latest batch upsert.
+    Replaces the cache wholesale so dropped markets don't accumulate forever.
+    Atomic swap — WS ticks that race with this call see either the old or new
+    full snapshot, never a partial one."""
+    new_cache = {}
     for item in items:
         ws_key = f"{item['market_id']}_{item.get('side', 'YES')}"
-        _wl_cache[ws_key] = item
+        new_cache[ws_key] = item
+    _wl_cache.clear()
+    _wl_cache.update(new_cache)
 
 
 def calc_stake(bankroll: float, config: dict, days_left: float = 99,
@@ -152,10 +158,14 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     }
 
     await db.save_position_and_deduct(pos, stake)
-    await db.upsert_watchlist(candidate)
+    # Once it's a position we don't need the watchlist row anymore — drop it
+    # (and its in-memory cache entry) so cleanup doesn't waste cycles on it
+    # and the WS callback can't re-fire entry logic on the same key.
+    ws_key = f"{market_id}_{side}"
+    await db.remove_from_watchlist(market_id, side)
+    _wl_cache.pop(ws_key, None)
 
     # Register in WS for position monitoring
-    ws_key = f"{market_id}_{side}"
     ws.mark_as_position(ws_key)
     if pos_cache is not None:
         pos_cache[ws_key] = pos
