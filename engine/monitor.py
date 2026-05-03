@@ -95,7 +95,8 @@ async def _verify_price_and_volume(http_client: httpx.AsyncClient, market_id: st
     """Fetch live bid (CLOB book) + 24h volume + accepting_orders (Gamma) in parallel.
     CLOB is source of truth for real-time price; Gamma midpoint lags 25+ min on thin markets.
     Returns (side_price, vol_24h, accepting_orders). (None, None, True) on error.
-    For NO side: CLOB returns YES token book → NO bid = 1 - YES_ask.
+    token_id must be the side's native token (YES side → YES token, NO side → NO token);
+    we read its best_bid directly — no inversion.
     Falls back to Gamma midpoint if CLOB unavailable (no token_id, fetch failure)."""
     if not http_client:
         return None, None, True
@@ -116,16 +117,12 @@ async def _verify_price_and_volume(http_client: httpx.AsyncClient, market_id: st
             accepting = bool(m.get("acceptingOrders", True))
             vol_24h = float(m.get("volume24hr") or 0)
 
-        # CLOB: live bid (preferred)
+        # CLOB: live bid (preferred). token_id is side-native, so best_bid is our exit price.
         price = None
         if book is not None and not isinstance(book, Exception):
-            best_bid, best_ask = _parse_clob_book(book)
-            if side == "NO":
-                if best_ask > 0:
-                    price = round(1.0 - best_ask, 4)
-            else:
-                if best_bid > 0:
-                    price = round(best_bid, 4)
+            best_bid, _best_ask = _parse_clob_book(book)
+            if best_bid > 0:
+                price = round(best_bid, 4)
 
         # Fallback: Gamma midpoint (lagged but better than nothing)
         if price is None and not isinstance(m, Exception):
@@ -204,8 +201,9 @@ async def check_position_price(ws_key: str, price: float, info: dict,
     if bid_price <= 0:
         bid_price = price
 
-    # token_id is the YES outcome token; passed to REST verify so it hits CLOB book API
-    # (live bid/ask) instead of falling back to lagged Gamma midpoint.
+    # token_id is the side's native outcome token (YES side → YES token, NO side →
+    # NO token). Passed to REST verify so it hits CLOB book API for the side we
+    # actually hold, instead of falling back to lagged Gamma midpoint.
     token_id = info.get("token_id") or ws.prices.get(ws_key, {}).get("token_id")
 
     pnl_pct = (bid_price - entry_price) / entry_price if entry_price > 0 else 0
@@ -356,8 +354,8 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         rest_price, vol_24h = None, None
         check_price = bid_price
     else:
-        # REST verify
-        rest_price, vol_24h, accepting = await _verify_price_and_volume(http_client, market_id, side)
+        # REST verify (uses native side token via CLOB book; no inversion)
+        rest_price, vol_24h, accepting = await _verify_price_and_volume(http_client, market_id, side, token_id)
         if not accepting:
             log.warning(f"[RAPID DROP PAUSED] {market_id[:8]} market not accepting orders — holding during maintenance")
             return
