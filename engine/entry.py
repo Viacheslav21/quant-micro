@@ -155,6 +155,12 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         "config_tag": config["CONFIG_TAG"],
         "end_date": candidate.get("end_date"),
         "neg_risk_id": neg_risk_id,
+        # Denormalized entry context — kept on the position so audit queries don't
+        # have to JOIN watchlist (we DELETE the watchlist row right after entry).
+        "quality": candidate.get("quality"),
+        "days_left": candidate.get("days_left"),
+        "spread": candidate.get("spread"),
+        "slug": candidate.get("slug"),
     }
 
     inserted = await db.save_position_and_deduct(pos, stake)

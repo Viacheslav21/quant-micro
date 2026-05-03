@@ -114,6 +114,32 @@ class Database:
             await conn.execute("""
                 ALTER TABLE micro_positions ADD COLUMN IF NOT EXISTS neg_risk_id TEXT DEFAULT NULL;
             """)
+            # Denormalized entry context — copied from watchlist at entry time so the
+            # diagnostics that ask "WR by quality / days_left at entry" still work
+            # after we DELETE the watchlist row on entry. Backfilled below from
+            # whichever watchlist rows still exist.
+            for col, typ in (
+                ("quality", "REAL"),
+                ("entry_days_left", "REAL"),
+                ("entry_spread", "REAL"),
+                ("slug", "TEXT"),
+            ):
+                await conn.execute(
+                    f"ALTER TABLE micro_positions ADD COLUMN IF NOT EXISTS {col} {typ} DEFAULT NULL;"
+                )
+            # One-time backfill (no-op once columns are populated). Limited to
+            # rows where both source and target are present.
+            await conn.execute("""
+                UPDATE micro_positions p
+                SET quality = w.quality,
+                    entry_days_left = w.days_left,
+                    entry_spread = w.spread
+                FROM micro_watchlist w
+                WHERE p.market_id = w.market_id
+                  AND p.side = w.side
+                  AND p.quality IS NULL
+                  AND w.quality IS NOT NULL;
+            """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_micro_pos_neg_risk
                     ON micro_positions(neg_risk_id) WHERE neg_risk_id IS NOT NULL;
@@ -396,8 +422,9 @@ class Database:
                 await conn.execute("""
                     INSERT INTO micro_positions
                         (id, market_id, question, theme, side, entry_price,
-                         current_price, stake_amt, config_tag, end_date, neg_risk_id)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                         current_price, stake_amt, config_tag, end_date, neg_risk_id,
+                         quality, entry_days_left, entry_spread, slug)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
                 """,
                     pos["id"], pos["market_id"], pos["question"],
                     pos.get("theme", "other"), pos["side"], pos["entry_price"],
@@ -405,6 +432,10 @@ class Database:
                     pos.get("config_tag", "micro-v3"),
                     pos.get("end_date"),
                     pos.get("neg_risk_id"),
+                    pos.get("quality"),
+                    pos.get("days_left"),
+                    pos.get("spread"),
+                    pos.get("slug"),
                 )
             return True
         except asyncpg.exceptions.UniqueViolationError:
