@@ -48,8 +48,10 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot,
         # (WS stops sending events when trading halts on resolution)
         ws_key = f"{pos['market_id']}_{pos.get('side', 'YES')}"
         ws_info = ws.prices.get(ws_key)
+        # Match monitor._WS_STALE_SEC (120s) so resolver doesn't double-check
+        # positions that rest_poll just handled.
         ws_stale = (ws_info is not None
-                    and _time.time() - ws_info.get("last_update", 0) > 300)
+                    and _time.time() - ws_info.get("last_update", 0) > 120)
 
         pos["_hours_past"] = hours_past
         pos["_is_expired"] = is_expired
@@ -72,20 +74,52 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot,
         except Exception:
             return None
 
+    async def _fetch_clob(token_id):
+        if not token_id:
+            return None
+        try:
+            r = await http_client.get(
+                f"https://clob.polymarket.com/book?token_id={token_id}", timeout=5,
+            )
+            return r.json() if r.status_code == 200 else None
+        except Exception:
+            return None
+
+    def _clob_bid(book):
+        """Best bid from CLOB book response, 0.0 if missing."""
+        if not book:
+            return 0.0
+        bids = book.get("bids") or []
+        return max(
+            (float(b.get("price", 0)) for b in bids
+             if float(b.get("size", 0) or 0) > 0),
+            default=0.0,
+        )
+
+    # Fetch Gamma + CLOB book (per side's native token) in parallel for every
+    # candidate. CLOB is the live order book — Gamma midpoint lags 25min on thin
+    # markets, which is exactly the window where positions like VIT (-2.5)
+    # silently bleed to 0 without exit firing.
     market_data = await asyncio.gather(*[_fetch_market(p["market_id"]) for p in to_check])
+    clob_books = await asyncio.gather(*[
+        _fetch_clob(ws.prices.get(f"{p['market_id']}_{p['side']}", {}).get("token_id"))
+        for p in to_check
+    ])
 
     def _invalidate(ws_key):
         p = pos_cache.pop(ws_key, None)
         if p:
             pos_last_db_write.pop(p.get("id"), None)
 
-    for pos, mdata in zip(to_check, market_data):
+    for pos, mdata, book in zip(to_check, market_data, clob_books):
         market_id = pos["market_id"]
         side = pos["side"]
         entry_price = pos["entry_price"]
         stake = pos["stake_amt"]
         ws_key = f"{market_id}_{side}"
         hours_past = pos["_hours_past"]
+        # token_id is for our side's native token; CLOB bid IS our exit price (no inversion).
+        clob_side_bid = _clob_bid(book)
 
         # 1. Check resolution via closed/resolved flag
         if mdata and (mdata.get("closed") or mdata.get("resolved")):
@@ -109,36 +143,49 @@ async def check_expired_positions(db: Database, ws: MicroWS, tg: TelegramBot,
                 )
             continue
 
-        # 2. Price-based resolution — API may lag with closed=false for hours
-        #    If REST price ≥99¢ our side → resolve (same threshold as monitor)
-        if mdata:
+        # 2. Price-based resolution — API may lag with closed=false for hours.
+        #    Prefer CLOB book bid (real-time order book) over Gamma midpoint
+        #    (lags 25min on thin markets). For NO side we hold the NO token,
+        #    so CLOB bid IS our side's bid; same for YES.
+        side_p = 0.0
+        if clob_side_bid > 0:
+            side_p = clob_side_bid
+        elif mdata:
             try:
                 yes_p, no_p = parse_outcome_prices(mdata)
-                if yes_p > 0 or no_p > 0:
-                    side_p = yes_p if side == "YES" else no_p
-                    if side_p >= 0.99 or side_p <= 0.01:
-                        won = side_p >= 0.99
-                        pnl = ((1.0 - entry_price) / entry_price) * stake if won else -stake
-                        result = "WIN" if won else "LOSS"
-                        closed = await db.close_position(pos["id"], round(pnl, 4), result, "resolved",
-                                                          exit_price=round(side_p, 4))
-                        if closed:
-                            ws.unmark_position(ws_key)
-                            _invalidate(ws_key)
-                            await db.recalibrate_theme(pos.get("theme", "other"))
-                            log.info(f"[RESOLVED BY PRICE] {result} {side} '{pos['question'][:40]}' side_p={side_p:.4f} PnL: ${pnl:.2f}")
-                            await tg.send(
-                                f"🔬 <b>MICRO</b> | 🏁 <b>RESOLVED {result}</b> {'✅' if won else '❌'}\n\n"
-                                f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
-                                f"📊 Вход: {entry_price*100:.1f}¢ | Цена: {side_p*100:.1f}¢\n"
-                                f"💰 PnL: <b>${pnl:.2f}</b>"
-                            )
-                        continue
+                side_p = yes_p if side == "YES" else no_p
             except Exception:
                 pass
+        if side_p > 0 and (side_p >= 0.99 or side_p <= 0.01):
+            won = side_p >= 0.99
+            pnl = ((1.0 - entry_price) / entry_price) * stake if won else -stake
+            result = "WIN" if won else "LOSS"
+            src = "CLOB" if clob_side_bid > 0 else "Gamma"
+            closed = await db.close_position(pos["id"], round(pnl, 4), result, "resolved",
+                                             exit_price=round(side_p, 4))
+            if closed:
+                ws.unmark_position(ws_key)
+                _invalidate(ws_key)
+                await db.recalibrate_theme(pos.get("theme", "other"))
+                log.info(f"[RESOLVED BY PRICE] {result} {side} '{pos['question'][:40]}' "
+                         f"side_p={side_p:.4f} ({src}) PnL: ${pnl:.2f}")
+                await tg.send(
+                    f"🔬 <b>MICRO</b> | 🏁 <b>RESOLVED {result}</b> {'✅' if won else '❌'}\n\n"
+                    f"{'✅' if side=='YES' else '❌'} {side} <b>{pos['question'][:80]}</b>\n"
+                    f"📊 Вход: {entry_price*100:.1f}¢ | Цена: {side_p*100:.1f}¢\n"
+                    f"💰 PnL: <b>${pnl:.2f}</b>"
+                )
+            continue
 
-        # Not resolved — update WS timestamp via proper API to prevent stale re-fires
-        ws.update_last_seen(ws_key)
+        # IMPORTANT: do NOT touch ws.last_update here. Earlier code did
+        # `ws.update_last_seen(ws_key)` to "prevent stale re-fires" in the resolver,
+        # but that suppressed rest_poll_stale_positions for the entire scan cycle —
+        # which is the only safety net when Polymarket WS goes silent on a token
+        # (illiquid markets, e.g. esports map handicaps with $5-15k volume).
+        # Production case 2026-05-03: VIT (-2.5) NO went 94¢→0¢ over 2h49m without
+        # WS ticks; resolver kept refreshing last_update so rest_poll never fired,
+        # and the position resolved at 0.05¢ for full -$20 instead of hitting the
+        # $3 MAX_LOSS cap. Letting last_update stay stale lets rest_poll do its job.
 
         # 3. Force-close if 72h+ past expiry (only for truly expired)
         if not pos.get("_is_expired") or hours_past < 72:

@@ -385,8 +385,12 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         await tg.send(msg)
 
 
-# WS silence threshold: if no tick received for this many seconds, trigger REST poll
-_WS_STALE_SEC = 300  # 5 minutes
+# WS silence threshold: if no tick received for this many seconds, trigger REST poll.
+# Lowered 300→120 (2026-05-04): for tonkij volume markets Polymarket WS legitimately
+# stops emitting events when the order book is stable. 5min was too long — VIT (-2.5)
+# went 94¢→0¢ in 2h49m without a single WS tick; tighter polling catches such
+# silent drops within a couple of scan cycles instead of waiting for resolution.
+_WS_STALE_SEC = 120  # 2 minutes
 
 
 async def rest_poll_stale_positions(open_positions: list,
