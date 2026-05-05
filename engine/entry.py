@@ -4,7 +4,7 @@ import time
 import logging
 
 from engine.shared import calc_days_left
-from engine.scanner import dynamic_entry_price, is_blocked_question
+from engine.scanner import dynamic_entry_price, is_blocked_question, quality_breakdown
 from engine.ws_client import MicroWS
 from utils.db import Database
 from utils.telegram import TelegramBot
@@ -33,14 +33,19 @@ def update_watchlist_cache(items: list):
 def calc_stake(bankroll: float, config: dict, days_left: float = 99,
                theme: str = "", quality: float = 0) -> float:
     """Stake = N% of bankroll (default 5%), capped by MAX_STAKE.
-    Near-expiry markets get a higher cap: ≤6h→MAX_STAKE_6H, ≤1d→MAX_STAKE_1D.
+    Near-expiry markets get a higher cap: ≤6h→MAX_STAKE_6H, ≤1d→MAX_STAKE_1D
+    — but only above MIN_Q_FOR_STAKE_UPLIFT (default 70). Q below the floor
+    falls back to base MAX_STAKE regardless of time-to-expiry.
+    Rationale: production data — Q60-69 + ≤1d markets at $35 stake produced
+    -$17 catastrophic losses (Hellas Verona, Hermannstadt, Everton spreads).
+    Time alone is not a reason to size up; quality must clear the floor.
     Q≥80 tier — best evidence-based bucket: production data shows Q80+ has near-100%
     WR, undercapitalized at base 5%. Two sub-tiers:
       Q80 + ≤6h → MAX_STAKE_Q80_6H ($75), PCT_STAKE_Q80 (7.5%)
       Q80 + ≤1d → MAX_STAKE_Q80_1D ($50), PCT_STAKE_Q80 (7.5%)
-    Rationale: shorter time + higher quality = lower variance = Kelly says bet more.
     Exception: esports — live matches can resolve 95¢→0¢ in minutes regardless
     of time-to-expiry/quality. Dynamic stake uplift does NOT apply."""
+    min_q_uplift = float(config.get("MIN_Q_FOR_STAKE_UPLIFT", 0))
     if theme == "esports":
         max_s = config["MAX_STAKE"]
         pct = 0.05
@@ -53,10 +58,10 @@ def calc_stake(bankroll: float, config: dict, days_left: float = 99,
         # MAX_STAKE_Q80_6H ($75) and the standard MAX_STAKE_1D ($35).
         max_s = config.get("MAX_STAKE_Q80_1D", 50.0)
         pct = float(config.get("PCT_STAKE_Q80", 0.075))
-    elif days_left <= 0.25:
+    elif days_left <= 0.25 and quality >= min_q_uplift:
         max_s = config.get("MAX_STAKE_6H", config["MAX_STAKE"] * 2.5)
         pct = 0.05
-    elif days_left <= 1.0:
+    elif days_left <= 1.0 and quality >= min_q_uplift:
         max_s = config.get("MAX_STAKE_1D", config["MAX_STAKE"] * 1.75)
         pct = 0.05
     else:
@@ -142,6 +147,28 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     if quality < min_q:
         return "low_quality"
 
+    # Forensic Q breakdown — recomputed at entry time from candidate fields.
+    # The stored `quality` came from scanner with the same inputs, so the breakdown's
+    # `adj` should match within rounding. Theme factor is reconstructed from the
+    # ratio of stored quality to raw score (or 1.0 if raw is 0).
+    qb = None
+    try:
+        c_price = candidate.get("price")
+        c_spread = candidate.get("spread")
+        c_days = candidate.get("days_left")
+        c_vol = candidate.get("volume", 0)
+        c_liq = candidate.get("liquidity", 0)
+        if c_price is not None and c_spread is not None and c_days is not None:
+            stored_q = float(candidate.get("quality") or 0)
+            # quality_breakdown's `raw` is the pre-theme-factor sum; derive the
+            # factor that scanner applied so the saved record reproduces exactly.
+            tmp = quality_breakdown(c_price, c_spread, c_days, c_vol, c_liq, question, 1.0)
+            raw = tmp["raw"]
+            tf = round(stored_q / raw, 3) if raw > 0 else 1.0
+            qb = quality_breakdown(c_price, c_spread, c_days, c_vol, c_liq, question, tf)
+    except Exception:
+        qb = None  # diagnostic-only; never block entry on breakdown failure
+
     # Execute
     pos_id = f"mic_{market_id[:8]}_{int(time.time())}"
     pos = {
@@ -158,6 +185,7 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
         # Denormalized entry context — kept on the position so audit queries don't
         # have to JOIN watchlist (we DELETE the watchlist row right after entry).
         "quality": candidate.get("quality"),
+        "quality_breakdown": qb,
         "days_left": candidate.get("days_left"),
         "spread": candidate.get("spread"),
         "slug": candidate.get("slug"),

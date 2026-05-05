@@ -354,6 +354,82 @@ def theme_quality_factor(theme: str, theme_wr: dict) -> float:
     return max(_ADJ_FACTOR_MIN, min(_ADJ_FACTOR_MAX, adj_wr / _TARGET_WR))
 
 
+def _score_components(price: float, spread: float, days_left: float,
+                      volume: float, liquidity: float,
+                      question: str = "") -> dict:
+    """Return per-component contributions to the raw quality score.
+    Sum of values (clamped at ≥0) equals what quality_score() returns.
+    Stored on each position as quality_breakdown for forensic analysis."""
+    # Price (0-40): peak 93-96¢ sweet spot
+    if price >= 0.98:
+        c_price = 0.0   # ROI <2%, barely profitable after fees
+    elif price >= 0.97:
+        c_price = 10.0
+    elif price >= 0.96:
+        c_price = 20.0
+    elif price >= 0.93:
+        c_price = 40.0  # SWEET SPOT (best ROI × probability)
+    elif price >= 0.91:
+        c_price = 25.0
+    elif price >= 0.90:
+        c_price = 15.0
+    else:
+        c_price = 0.0
+
+    # Spread (0-15) — tighter = better
+    c_spread = max(0.0, 15 - spread * 1500)
+
+    # Days to resolution (0-30) — audit: ≤1d is best bucket
+    if days_left <= 0.5:
+        c_days = 30.0
+    elif days_left <= 1:
+        c_days = 25.0
+    elif days_left <= 2:
+        c_days = 10.0
+    elif days_left <= 3:
+        c_days = 5.0
+    else:
+        c_days = 0.0
+
+    # Volume (0-15)
+    if volume > 500_000:
+        c_volume = 15.0
+    elif volume > 100_000:
+        c_volume = 10.0
+    elif volume > 50_000:
+        c_volume = 6.0
+    elif volume > 20_000:
+        c_volume = 3.0
+    else:
+        c_volume = 0.0
+
+    # Liquidity (-3..+5) — orderbook depth = exit-ability. Direct signal for
+    # slip past MAX_LOSS cap on rapid drops.
+    if liquidity >= 50_000:
+        c_liquidity = 5.0
+    elif liquidity >= 20_000:
+        c_liquidity = 3.0
+    elif liquidity >= 5_000:
+        c_liquidity = 1.0
+    elif liquidity < 2_000:
+        c_liquidity = -3.0
+    else:
+        c_liquidity = 0.0
+
+    # Structural risk penalty — patterns that evolve worse than numeric
+    # features predict (spread/handicap, series, tweet/post buckets).
+    c_structural = -10.0 if (question and is_structural_risk(question)) else 0.0
+
+    return {
+        "price":      round(c_price, 1),
+        "spread":     round(c_spread, 1),
+        "days":       round(c_days, 1),
+        "volume":     round(c_volume, 1),
+        "liquidity":  round(c_liquidity, 1),
+        "structural": round(c_structural, 1),
+    }
+
+
 def quality_score(price: float, spread: float, days_left: float,
                   volume: float, liquidity: float,
                   question: str = "") -> float:
@@ -364,66 +440,26 @@ def quality_score(price: float, spread: float, days_left: float,
     days >3d (empirically weaker), thin orderbook (slip past MAX_LOSS cap),
     structurally risky question patterns (sports spreads, series, tweet buckets).
     """
-    score = 0.0
+    comps = _score_components(price, spread, days_left, volume, liquidity, question)
+    return round(max(0.0, sum(comps.values())), 1)
 
-    # Price (0-40): peak 93-96¢ sweet spot
-    if price >= 0.98:
-        score += 0   # ROI <2%, barely profitable after fees
-    elif price >= 0.97:
-        score += 10
-    elif price >= 0.96:
-        score += 20
-    elif price >= 0.93:
-        score += 40  # SWEET SPOT (best ROI × probability)
-    elif price >= 0.91:
-        score += 25
-    elif price >= 0.90:
-        score += 15
-    # <90¢: 0
 
-    # Spread (0-15) — tighter = better
-    score += max(0, 15 - spread * 1500)
-
-    # Days to resolution (0-30) — audit: ≤1d is best bucket
-    if days_left <= 0.5:
-        score += 30
-    elif days_left <= 1:
-        score += 25
-    elif days_left <= 2:
-        score += 10
-    elif days_left <= 3:
-        score += 5
-    # >3d: 0
-
-    # Volume (0-15)
-    if volume > 500_000:
-        score += 15
-    elif volume > 100_000:
-        score += 10
-    elif volume > 50_000:
-        score += 6
-    elif volume > 20_000:
-        score += 3
-
-    # Liquidity (0..+5, -3 if very thin) — orderbook depth = exit-ability.
-    # Direct signal for slip past MAX_LOSS cap on rapid drops.
-    if liquidity >= 50_000:
-        score += 5
-    elif liquidity >= 20_000:
-        score += 3
-    elif liquidity >= 5_000:
-        score += 1
-    elif liquidity < 2_000:
-        score -= 3
-
-    # Structural risk penalty — these aren't binary (won't gap to 0) but
-    # underperform at sub-Q80 entries: spread/handicap markets, series, tweet
-    # count buckets. Costs ~10 points so a Q70 candidate becomes Q60-ish and
-    # is filtered by the global gate; Q≥85 candidates still survive.
-    if question and is_structural_risk(question):
-        score -= 10
-
-    return round(max(0.0, score), 1)
+def quality_breakdown(price: float, spread: float, days_left: float,
+                      volume: float, liquidity: float,
+                      question: str = "", theme_factor: float = 1.0) -> dict:
+    """Same signature as quality_score plus theme_factor — returns the full
+    breakdown that produced the final adjusted score, for storage on a position.
+    Schema:  {price, spread, days, volume, liquidity, structural, theme_factor, raw, adj}
+    where raw = sum(components clamped at 0), adj = round(raw * theme_factor, 1)."""
+    comps = _score_components(price, spread, days_left, volume, liquidity, question)
+    raw = round(max(0.0, sum(comps.values())), 1)
+    adj = round(raw * theme_factor, 1)
+    return {
+        **comps,
+        "theme_factor": round(theme_factor, 3),
+        "raw":          raw,
+        "adj":          adj,
+    }
 
 
 def _parse_token_ids(m: dict) -> tuple:

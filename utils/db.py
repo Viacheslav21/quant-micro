@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import json as _json
 from typing import Optional
 import asyncpg
 
@@ -123,6 +124,11 @@ class Database:
                 ("entry_days_left", "REAL"),
                 ("entry_spread", "REAL"),
                 ("slug", "TEXT"),
+                # Forensic Q breakdown — components that produced the entry score
+                # (price, spread, days, volume, liquidity, structural, theme_factor,
+                # raw, adj). Lets us answer "which components correlate with losses"
+                # without re-deriving the formula by hand.
+                ("quality_breakdown", "JSONB"),
             ):
                 await conn.execute(
                     f"ALTER TABLE micro_positions ADD COLUMN IF NOT EXISTS {col} {typ} DEFAULT NULL;"
@@ -258,6 +264,7 @@ class Database:
         ("MAX_STAKE_Q80_6H",   75.0,  "float", "Cap $ for Q≥80 + ≤6h trades — 100% WR bucket, gets the highest Kelly stake", 5.0, 300.0, "sizing"),
         ("MAX_STAKE_Q80_1D",   50.0,  "float", "Cap $ for Q≥80 + ≤1d trades — middle tier between Q80_6H ($75) and standard MAX_STAKE_1D ($35)", 5.0, 300.0, "sizing"),
         ("PCT_STAKE_Q80",      0.075, "float", "Kelly fraction for Q≥80 tiers (vs 0.05 default) — bumped because WR is near 100%", 0.02, 0.20, "sizing"),
+        ("MIN_Q_FOR_STAKE_UPLIFT", 70, "float", "Q floor for ≤6h/$50 and ≤1d/$35 time-based uplifts. Q<floor → MAX_STAKE. Q80+ tiers unaffected", 0, 100, "sizing"),
         # capacity
         ("MAX_OPEN",           50,    "int",   "Total open micro positions allowed", 1, 200, "capacity"),
         ("MAX_PER_THEME",      5,     "int",   "Positions per theme — bypassed for negRisk (uses MAX_PER_NEG_RISK)", 1, 50, "capacity"),
@@ -418,13 +425,15 @@ class Database:
         (caught via the partial unique index on (market_id, side) WHERE status='open').
         Bankroll is computed live from positions — no separate stats update needed."""
         try:
+            qb = pos.get("quality_breakdown")
+            qb_json = _json.dumps(qb) if qb is not None else None
             async with self.pool.acquire() as conn:
                 await conn.execute("""
                     INSERT INTO micro_positions
                         (id, market_id, question, theme, side, entry_price,
                          current_price, stake_amt, config_tag, end_date, neg_risk_id,
-                         quality, entry_days_left, entry_spread, slug)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                         quality, entry_days_left, entry_spread, slug, quality_breakdown)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
                 """,
                     pos["id"], pos["market_id"], pos["question"],
                     pos.get("theme", "other"), pos["side"], pos["entry_price"],
@@ -436,6 +445,7 @@ class Database:
                     pos.get("days_left"),
                     pos.get("spread"),
                     pos.get("slug"),
+                    qb_json,
                 )
             return True
         except asyncpg.exceptions.UniqueViolationError:

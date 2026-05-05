@@ -441,6 +441,30 @@ q_near = quality_score(0.94, 0.01, 0.3, 500000, 100000)
 q_far = quality_score(0.94, 0.01, 5.0, 500000, 100000)
 check(f"≤0.5d ({q_near:.0f}) > 5d ({q_far:.0f})", q_near > q_far)
 
+# Quality breakdown — components must sum to the raw score
+from engine.scanner import quality_breakdown, _score_components, is_structural_risk
+b = quality_breakdown(0.94, 0.005, 0.5, 500_000, 100_000)
+check("breakdown has all components", set(b.keys()) >= {"price","spread","days","volume","liquidity","structural","theme_factor","raw","adj"})
+check("breakdown.raw matches quality_score", b["raw"] == quality_score(0.94, 0.005, 0.5, 500_000, 100_000))
+check("breakdown.adj == raw when factor=1.0", b["adj"] == b["raw"])
+b_themed = quality_breakdown(0.94, 0.005, 0.5, 500_000, 100_000, theme_factor=0.85)
+check("breakdown.adj scales with theme_factor", b_themed["adj"] == round(b_themed["raw"] * 0.85, 1))
+# Liquidity component
+b_thin = quality_breakdown(0.94, 0.005, 0.5, 500_000, 1_000)
+check("thin liquidity → -3 component",       b_thin["liquidity"] == -3.0)
+b_deep = quality_breakdown(0.94, 0.005, 0.5, 500_000, 100_000)
+check("deep liquidity → +5 component",       b_deep["liquidity"] == 5.0)
+# Structural penalty
+b_spread = quality_breakdown(0.95, 0.005, 0.5, 500_000, 50_000, "Spread: Liverpool FC (-2.5)")
+check("Spread: question → structural=-10",   b_spread["structural"] == -10.0)
+check("Spread: question → adj < non-spread", b_spread["adj"] < quality_breakdown(0.95, 0.005, 0.5, 500_000, 50_000, "Will Liverpool FC win?")["adj"])
+# is_structural_risk patterns
+check("is_structural_risk on Spread",        is_structural_risk("Spread: Liverpool FC (-2.5)"))
+check("is_structural_risk on Game Handicap", is_structural_risk("Game Handicap: ESB (-1.5) vs Onion Team"))
+check("is_structural_risk on Series",        is_structural_risk("NBA Playoffs: Who Will Win Series? - Pistons vs. Magic"))
+check("is_structural_risk on tweets from",   is_structural_risk("Will Elon Musk post 65-89 tweets from May 2 to May 4, 2026"))
+check("is_structural_risk OFF on plain win", not is_structural_risk("Will Liverpool FC win on 2026-05-03?"))
+
 
 # ══════════════════════════════════════
 # 8. Realistic Sim Costs (slippage + fees)
@@ -1082,6 +1106,25 @@ cfg_no_q80 = {"MAX_STAKE": 20.0, "MIN_STAKE": 5.0, "MAX_STAKE_6H": 50.0}
 check("Q80+6h fallback: default $75 cap, default 7.5% pct", calc_stake(1239, cfg_no_q80, days_left=0.1, quality=85) == 75.0)
 # Backward compat: no quality argument → defaults to 0 (no uplift)
 check("No quality arg: no Q80 uplift", calc_stake(1239, cfg_q80, days_left=0.1) == 50.0)
+
+# MIN_Q_FOR_STAKE_UPLIFT — Q-floor on time-based uplift (non-Q80 tiers)
+cfg_qfloor = {**cfg_dyn, "MIN_Q_FOR_STAKE_UPLIFT": 70}
+# Below floor: time-based uplift suppressed, falls back to MAX_STAKE
+check("Q65 + ≤1d: below Q-floor → base $20 (was $35)", calc_stake(1000, cfg_qfloor, days_left=0.5, quality=65) == 20.0)
+check("Q69 + ≤6h: below Q-floor → base $20 (was $50)", calc_stake(1000, cfg_qfloor, days_left=0.1, quality=69) == 20.0)
+# At floor: uplift applies normally
+check("Q70 + ≤1d: at floor → MAX_STAKE_1D=$35",      calc_stake(1000, cfg_qfloor, days_left=0.5, quality=70) == 35.0)
+check("Q70 + ≤6h: at floor → MAX_STAKE_6H=$50",      calc_stake(1000, cfg_qfloor, days_left=0.1, quality=70) == 50.0)
+check("Q75 + ≤1d: above floor → MAX_STAKE_1D=$35",   calc_stake(1000, cfg_qfloor, days_left=0.5, quality=75) == 35.0)
+# Q80+ tiers unaffected by floor (always uplifted)
+cfg_qfloor_q80 = {**cfg_q80, "MIN_Q_FOR_STAKE_UPLIFT": 70}
+check("Q80 + ≤6h: Q80 tier unaffected by floor",     calc_stake(1239, cfg_qfloor_q80, days_left=0.1, quality=80) == 75.0)
+check("Q80 + ≤1d: Q80 tier unaffected by floor",     calc_stake(1239, cfg_qfloor_q80, days_left=0.5, quality=85) == 50.0)
+# Floor=0 disables the gate (backward compat with old configs)
+cfg_qfloor_off = {**cfg_dyn, "MIN_Q_FOR_STAKE_UPLIFT": 0}
+check("Floor=0 + Q40 + ≤1d: gate off → $35",         calc_stake(1000, cfg_qfloor_off, days_left=0.5, quality=40) == 35.0)
+# Missing key falls back to floor=0 (backward compat)
+check("Missing MIN_Q_FOR_STAKE_UPLIFT: gate off",    calc_stake(1000, cfg_dyn, days_left=0.5, quality=40) == 35.0)
 
 # try_enter passes days_left: 6h market gets bigger stake
 print("  (try_enter dynamic stake integration via calc_stake directly ↑)")

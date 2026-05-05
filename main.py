@@ -66,6 +66,9 @@ CONFIG = {
     "MAX_STAKE_Q80_6H":   float(os.getenv("MAX_STAKE_Q80_6H", "75.0")),
     "MAX_STAKE_Q80_1D":   float(os.getenv("MAX_STAKE_Q80_1D", "50.0")),  # Q80 + ≤1d middle tier
     "PCT_STAKE_Q80":      float(os.getenv("PCT_STAKE_Q80", "0.075")),  # 7.5% Kelly fraction (vs 5% default)
+    # Time-based stake uplift requires Q ≥ floor — Q<floor falls back to MAX_STAKE.
+    # Production: -$40+ in May from Q60-69 + ≤1d at $35-50 stake.
+    "MIN_Q_FOR_STAKE_UPLIFT": float(os.getenv("MIN_Q_FOR_STAKE_UPLIFT", "70")),
 }
 
 # ── Logging ──
@@ -97,6 +100,7 @@ _SAFE_CONFIG_KEYS = {
     "BANKROLL", "SLIPPAGE", "FEE_PCT",
     "TAKE_PROFIT_PRICE", "TAKE_PROFIT_MIN_DAYS", "MAX_STAKE_6H", "MAX_STAKE_1D",
     "MAX_STAKE_Q80_6H", "MAX_STAKE_Q80_1D", "PCT_STAKE_Q80",
+    "MIN_Q_FOR_STAKE_UPLIFT",
 }
 
 
