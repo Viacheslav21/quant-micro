@@ -278,6 +278,20 @@ BLOCKED_QUESTION_KEYWORDS = [
     "global temperature",
 ]
 
+# Markets that aren't binary-risk but evolve unfavorably more often than the
+# numeric features predict — multi-day sports spreads, series winners, tweet
+# count buckets. Production data: all -$15+ losses in May came from these
+# patterns at Q60-69. Penalty applied in quality_score, not a hard block.
+_STRUCTURAL_RISK_PATTERNS = [
+    re.compile(r"^\s*spread:", re.I),                 # "Spread: Liverpool FC (-2.5)" — slow grind
+    re.compile(r"^\s*map handicap:", re.I),           # "Map Handicap: VIT (-1.5)"
+    re.compile(r"^\s*game handicap:", re.I),          # "Game Handicap: ESB (-1.5)"
+    re.compile(r"who will win series", re.I),         # "NBA Playoffs: Who Will Win Series?"
+    re.compile(r"\bseries\?\s*-", re.I),              # generic "... Series? - X vs Y"
+    re.compile(r"\btweets?\s+from\b", re.I),          # "Will Elon Musk post X tweets from..."
+    re.compile(r"\bposts?\s+from\b", re.I),           # "Will White House post X posts from..."
+]
+
 
 def is_binary_risk(question: str) -> bool:
     """Check if market can lose entire stake instantly (no gradual price decline).
@@ -285,6 +299,12 @@ def is_binary_risk(question: str) -> bool:
     Includes per-game/per-map esports winner markets: a single live game resolves
     in 15-40 min and can flip from 95¢+ to $0 on a single upset."""
     return any(p.search(question) for p in _BINARY_RISK_PATTERNS)
+
+
+def is_structural_risk(question: str) -> bool:
+    """Markets that evolve worse than their numeric features suggest.
+    Not binary (won't gap to 0), but historically loss-prone at sub-Q80 entries."""
+    return any(p.search(question) for p in _STRUCTURAL_RISK_PATTERNS)
 
 
 def is_blocked_question(question: str) -> bool:
@@ -335,13 +355,14 @@ def theme_quality_factor(theme: str, theme_wr: dict) -> float:
 
 
 def quality_score(price: float, spread: float, days_left: float,
-                  volume: float, liquidity: float) -> float:
+                  volume: float, liquidity: float,
+                  question: str = "") -> float:
     """Score 0-100 for resolution harvesting.
 
-    Sweet spot: price 93-96¢, days ≤1, tight spread, high volume.
+    Sweet spot: price 93-96¢, days ≤1, tight spread, high volume + depth.
     Penalizes: prices ≥98¢ (ROI too thin after fees), prices <90¢ (uncertain),
-    days >3d (empirically weaker). Data from audit: Q60-80 bucket has best
-    avg PnL, Q80+ underperforms due to catastrophic losses on high-price markets.
+    days >3d (empirically weaker), thin orderbook (slip past MAX_LOSS cap),
+    structurally risky question patterns (sports spreads, series, tweet buckets).
     """
     score = 0.0
 
@@ -384,7 +405,25 @@ def quality_score(price: float, spread: float, days_left: float,
     elif volume > 20_000:
         score += 3
 
-    return round(score, 1)
+    # Liquidity (0..+5, -3 if very thin) — orderbook depth = exit-ability.
+    # Direct signal for slip past MAX_LOSS cap on rapid drops.
+    if liquidity >= 50_000:
+        score += 5
+    elif liquidity >= 20_000:
+        score += 3
+    elif liquidity >= 5_000:
+        score += 1
+    elif liquidity < 2_000:
+        score -= 3
+
+    # Structural risk penalty — these aren't binary (won't gap to 0) but
+    # underperform at sub-Q80 entries: spread/handicap markets, series, tweet
+    # count buckets. Costs ~10 points so a Q70 candidate becomes Q60-ish and
+    # is filtered by the global gate; Q≥85 candidates still survive.
+    if question and is_structural_risk(question):
+        score -= 10
+
+    return round(max(0.0, score), 1)
 
 
 def _parse_token_ids(m: dict) -> tuple:
@@ -598,7 +637,7 @@ class MicroScanner:
                     if roi < min_roi:
                         rej["roi"] += 1
                     else:
-                        q = round(quality_score(yes_price, spread, days_left, vol, liq) * theme_factor, 1)
+                        q = round(quality_score(yes_price, spread, days_left, vol, liq, question) * theme_factor, 1)
                         if q < min_quality:
                             rej["quality"] += 1
                             _quality_samples.append((yes_price, q, days_left, f"YES {question[:60]}"))
@@ -618,7 +657,7 @@ class MicroScanner:
                     if roi < min_roi:
                         rej["roi"] += 1
                     else:
-                        q = round(quality_score(no_price, spread, days_left, vol, liq) * theme_factor, 1)
+                        q = round(quality_score(no_price, spread, days_left, vol, liq, question) * theme_factor, 1)
                         if q < min_quality:
                             rej["quality"] += 1
                             _quality_samples.append((no_price, q, days_left, f"NO {question[:60]}"))
