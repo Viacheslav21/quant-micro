@@ -278,6 +278,15 @@ BLOCKED_QUESTION_KEYWORDS = [
     "global temperature",
 ]
 
+# Permanent regex blocks. Distinct from BLOCKED_QUESTION_KEYWORDS (substring) and
+# from _BINARY_RISK_PATTERNS (gap-to-zero markets). Use this for patterns that
+# evolve gradually but proved net-negative on real production data.
+# Sports spreads: production data — 11 trades, WR 63.6%, total -$19.12 vs
+# non-spread sports 73 trades, WR 89%, total +$60.09 (May 2026).
+_BLOCKED_QUESTION_PATTERNS = [
+    re.compile(r"^\s*spread:", re.I),                 # "Spread: Liverpool FC (-2.5)"
+]
+
 # Markets that aren't binary-risk but evolve unfavorably more often than the
 # numeric features predict — multi-day sports spreads, series winners, tweet
 # count buckets. Production data: all -$15+ losses in May came from these
@@ -309,7 +318,9 @@ def is_structural_risk(question: str) -> bool:
 
 def is_blocked_question(question: str) -> bool:
     q = question.lower()
-    return any(kw in q for kw in BLOCKED_QUESTION_KEYWORDS)
+    if any(kw in q for kw in BLOCKED_QUESTION_KEYWORDS):
+        return True
+    return any(p.search(question) for p in _BLOCKED_QUESTION_PATTERNS)
 
 
 def dynamic_entry_price(days_left: float, base_price: float, config: dict = None) -> float:

@@ -465,6 +465,15 @@ check("is_structural_risk on Series",        is_structural_risk("NBA Playoffs: W
 check("is_structural_risk on tweets from",   is_structural_risk("Will Elon Musk post 65-89 tweets from May 2 to May 4, 2026"))
 check("is_structural_risk OFF on plain win", not is_structural_risk("Will Liverpool FC win on 2026-05-03?"))
 
+# Hard block on Spread: pattern (production: WR 63.6%, total -$19 over 11 trades)
+from engine.scanner import is_blocked_question
+check("Spread: hard-blocked",                is_blocked_question("Spread: Liverpool FC (-2.5)"))
+check("Spread: case-insensitive",            is_blocked_question("SPREAD: West Ham (-1.5)"))
+check("Spread block: leading whitespace ok", is_blocked_question("  Spread: Everton (-1.5)"))
+check("Plain sports NOT blocked",            not is_blocked_question("Will Liverpool FC win on 2026-05-03?"))
+check("Existing keyword block still works",  is_blocked_question("Will the highest temperature in Hong Kong be 25°C?"))
+check("Map Handicap NOT hard-blocked (Q-penalty only)", not is_blocked_question("Map Handicap: VIT (-1.5) vs Natus Vincere"))
+
 
 # ══════════════════════════════════════
 # 8. Realistic Sim Costs (slippage + fees)
