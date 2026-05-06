@@ -268,6 +268,7 @@ _BINARY_RISK_PATTERNS = [
     re.compile(r"(?:btc|bitcoin|eth(?:ereum)?|sol(?:ana)?|xrp).{0,20}(?:above|over|exceed|reach|hit|surpass).{0,10}\$[\d,.k]+", re.I),  # "BTC above $76k" — can flash-crash through level instantly
     re.compile(r"(?:btc|bitcoin|eth(?:ereum)?|sol(?:ana)?|xrp).{0,20}(?:below|under|drop(?:s)?\s+to|fall(?:s)?\s+to|dip(?:s)?\s+to).{0,10}\$[\d,.k]+", re.I),  # "BTC below/dip to $70k" — inverse of above; "dip to" covers Polymarket's "Will Bitcoin dip to $76,000" format
     re.compile(r"\bo/u\s+\d+\.?\d*\b", re.I),          # "O/U 7.5" — sports total, crosses instantly when run/goal scored
+    re.compile(r"^\s*exact score:", re.I),             # "Exact Score: Arsenal 2 - 2 Atletico" — NO collapses to 0 if live score hits the exact value mid-match (-$92 in two trades on 2026-05-05)
 ]
 
 

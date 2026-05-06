@@ -268,6 +268,16 @@ candidate_low_q = {**BASE_CANDIDATE, "quality": 20}
 result = run(try_enter(candidate_low_q, MockDB(), MockWS(), MockTG(), BASE_CONFIG))
 check("Reject: low_quality", result == "low_quality")
 
+# Binary risk safety net — scanner already filters, but event cascade and
+# pre-filter watchlist rows can sneak through. try_enter must re-check.
+candidate_exact_score = {**BASE_CANDIDATE, "question": "Exact Score: Arsenal FC 2 - 2 Club Atlético de Madrid?"}
+result = run(try_enter(candidate_exact_score, MockDB(), MockWS(), MockTG(), BASE_CONFIG))
+check("Reject: binary_risk (exact score)", result == "binary_risk", f"got {result}")
+
+candidate_ou = {**BASE_CANDIDATE, "question": "Boston Red Sox vs. Baltimore Orioles: O/U 7.5"}
+result = run(try_enter(candidate_ou, MockDB(), MockWS(), MockTG(), BASE_CONFIG))
+check("Reject: binary_risk (O/U)", result == "binary_risk", f"got {result}")
+
 # Successful entry
 db = MockDB()
 ws = MockWS()
@@ -1082,12 +1092,15 @@ check("6h: small bankroll $60 → 5% = $3, but MIN_STAKE=$5", calc_stake(60, cfg
 # Backward compat: no days_left argument → defaults to 99 (regular MAX_STAKE)
 check("No days_left: regular MAX_STAKE", calc_stake(1000, cfg_dyn) == 20.0)
 
-# Esports exception: dynamic uplift does NOT apply — live BO3 matches can resolve
-# 95c→0c in minutes, so "shorter time = higher certainty" logic doesn't hold.
+# Esports & sports exception: dynamic uplift does NOT apply — live matches can
+# resolve 95c→0c in minutes, so "shorter time = higher certainty" logic doesn't
+# hold. Sports added after 2026-05-05 Arsenal Exact Score losses (-$92).
 check("esports 6h: capped at MAX_STAKE not MAX_STAKE_6H", calc_stake(1000, cfg_dyn, days_left=0.1, theme="esports") == 20.0)
 check("esports 1d: capped at MAX_STAKE not MAX_STAKE_1D", calc_stake(1000, cfg_dyn, days_left=0.5, theme="esports") == 20.0)
 check("esports >1d: still MAX_STAKE", calc_stake(1000, cfg_dyn, days_left=3.0, theme="esports") == 20.0)
-check("non-esports 6h: still gets MAX_STAKE_6H", calc_stake(1000, cfg_dyn, days_left=0.1, theme="crypto") == 50.0)
+check("sports 6h: capped at MAX_STAKE not MAX_STAKE_6H", calc_stake(1000, cfg_dyn, days_left=0.1, theme="sports") == 20.0)
+check("sports 1d: capped at MAX_STAKE not MAX_STAKE_1D", calc_stake(1000, cfg_dyn, days_left=0.5, theme="sports") == 20.0)
+check("non-esports/sports 6h: still gets MAX_STAKE_6H", calc_stake(1000, cfg_dyn, days_left=0.1, theme="crypto") == 50.0)
 
 # Q≥80 + ≤6h tier: bumped Kelly fraction (7.5%) and higher cap (MAX_STAKE_Q80_6H)
 # Production data: Q80+ is 100% WR (15/15) — undercapitalized at base 5%.
@@ -1106,8 +1119,9 @@ check("Q80 + 2d: uses MAX_STAKE", calc_stake(1239, cfg_q80, days_left=2.0, quali
 check("Q79 + 0.5d: NO Q80 uplift, uses MAX_STAKE_1D=$35", calc_stake(1239, cfg_q80, days_left=0.5, quality=79) == 35.0)
 # Q80 + 1d tier — small bankroll: pct=7.5% binds before cap
 check("Q80 + 0.5d: bankroll $400, 7.5%=$30 (pct binds, > MIN)", calc_stake(400, cfg_q80, days_left=0.5, quality=85) == 30.0)
-# Q80+esports: esports rule wins (uplift disabled for esports regardless of quality)
+# Q80+esports/sports: theme rule wins (uplift disabled regardless of quality)
 check("esports Q80+6h: still capped at MAX_STAKE", calc_stake(1239, cfg_q80, days_left=0.1, theme="esports", quality=90) == 20.0)
+check("sports Q80+6h: still capped at MAX_STAKE",  calc_stake(1239, cfg_q80, days_left=0.1, theme="sports",  quality=90) == 20.0)
 # Lower bankroll: pct binds before cap
 check("Q80+6h: bankroll $500, 7.5%=$37.5 (pct binds)", calc_stake(500, cfg_q80, days_left=0.1, quality=85) == 37.5)
 # Defaults: missing config keys → fallback to defaults

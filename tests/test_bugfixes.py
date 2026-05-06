@@ -528,5 +528,30 @@ class TestMaxLossBypassConfig(unittest.TestCase):
         self.assertIn("MAX_LOSS_BYPASS_BLOCKS", safe_block)
 
 
+# ── Exact-score sport markets are binary risk ──
+# 2026-05-05: NO @ 95.5c on "Exact Score: Arsenal 2-2 Atletico" collapsed to 4c
+# when the live match actually reached 2-2 (-$49.17 on $50 stake). Same trade
+# pattern caused -$43.33 on "Exact Score: Arsenal 3-1 Atletico" the same day.
+
+class TestExactScoreBinaryRisk(unittest.TestCase):
+    def test_block_exact_score_2_2(self):
+        from engine.scanner import is_binary_risk
+        self.assertTrue(is_binary_risk("Exact Score: Arsenal FC 2 - 2 Club Atlético de Madrid?"))
+
+    def test_block_exact_score_3_1(self):
+        from engine.scanner import is_binary_risk
+        self.assertTrue(is_binary_risk("Exact Score: Arsenal FC 3 - 1 Club Atlético de Madrid?"))
+
+    def test_block_exact_score_lowercase(self):
+        from engine.scanner import is_binary_risk
+        self.assertTrue(is_binary_risk("exact score: Real Madrid 1 - 0 Barcelona"))
+
+    def test_allow_score_in_other_context(self):
+        from engine.scanner import is_binary_risk
+        # "exact score" must be at the start (prefix), not anywhere — generic
+        # mentions of "score" elsewhere shouldn't match.
+        self.assertFalse(is_binary_risk("Will the score be over 2.5?"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

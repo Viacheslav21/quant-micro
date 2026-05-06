@@ -4,7 +4,7 @@ import time
 import logging
 
 from engine.shared import calc_days_left
-from engine.scanner import dynamic_entry_price, is_blocked_question, quality_breakdown
+from engine.scanner import dynamic_entry_price, is_binary_risk, is_blocked_question, quality_breakdown
 from engine.ws_client import MicroWS
 from utils.db import Database
 from utils.telegram import TelegramBot
@@ -43,10 +43,13 @@ def calc_stake(bankroll: float, config: dict, days_left: float = 99,
     WR, undercapitalized at base 5%. Two sub-tiers:
       Q80 + ≤6h → MAX_STAKE_Q80_6H ($75), PCT_STAKE_Q80 (7.5%)
       Q80 + ≤1d → MAX_STAKE_Q80_1D ($50), PCT_STAKE_Q80 (7.5%)
-    Exception: esports — live matches can resolve 95¢→0¢ in minutes regardless
-    of time-to-expiry/quality. Dynamic stake uplift does NOT apply."""
+    Exception: esports & sports — live matches can resolve 95¢→0¢ in minutes
+    regardless of time-to-expiry/quality. Dynamic stake uplift does NOT apply.
+    Sports added after 2026-05-05: -$92 in two trades on Exact Score markets at
+    $50 stake (Q70-71); sports as a theme has ROI=-1.0% / WR=86.7% — single
+    losing tail wipes out the bucket."""
     min_q_uplift = float(config.get("MIN_Q_FOR_STAKE_UPLIFT", 0))
-    if theme == "esports":
+    if theme in ("esports", "sports"):
         max_s = config["MAX_STAKE"]
         pct = 0.05
     elif quality >= 80 and days_left <= 0.25:
@@ -94,6 +97,12 @@ async def try_enter(candidate: dict, db: Database, ws: MicroWS,
     # Blocked question keywords (city/pattern blacklist)
     if is_blocked_question(question):
         return "blocked_question"
+
+    # Binary-risk safety net: scanner already filters these out, but event cascade
+    # (negRisk YES → NO sibling) and watchlist rows persisted before the filter
+    # was added bypass that path. Re-check at entry to close the gap.
+    if is_binary_risk(question):
+        return "binary_risk"
 
     # Combined entry check: duplicate, theme block, SL blacklist, cooldown, negRisk group
     entry_check = await db.check_entry_allowed(market_id, side, theme, neg_risk_id=neg_risk_id,
