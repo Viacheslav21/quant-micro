@@ -464,25 +464,32 @@ b_thin = quality_breakdown(0.94, 0.005, 0.5, 500_000, 1_000)
 check("thin liquidity → -3 component",       b_thin["liquidity"] == -3.0)
 b_deep = quality_breakdown(0.94, 0.005, 0.5, 500_000, 100_000)
 check("deep liquidity → +5 component",       b_deep["liquidity"] == 5.0)
-# Structural penalty
-b_spread = quality_breakdown(0.95, 0.005, 0.5, 500_000, 50_000, "Spread: Liverpool FC (-2.5)")
-check("Spread: question → structural=-10",   b_spread["structural"] == -10.0)
-check("Spread: question → adj < non-spread", b_spread["adj"] < quality_breakdown(0.95, 0.005, 0.5, 500_000, 50_000, "Will Liverpool FC win?")["adj"])
-# is_structural_risk patterns
-check("is_structural_risk on Spread",        is_structural_risk("Spread: Liverpool FC (-2.5)"))
-check("is_structural_risk on Game Handicap", is_structural_risk("Game Handicap: ESB (-1.5) vs Onion Team"))
-check("is_structural_risk on Series",        is_structural_risk("NBA Playoffs: Who Will Win Series? - Pistons vs. Magic"))
+# Structural penalty: tweet/post buckets only — series/handicap/spread are
+# now hard-blocked at the scanner gate, so structural=-10 won't fire on them.
+b_tweets = quality_breakdown(0.95, 0.005, 0.5, 500_000, 50_000, "Will Elon Musk post 65-89 tweets from May 2 to May 4")
+check("Tweets: question → structural=-10",   b_tweets["structural"] == -10.0)
+check("Tweets: question → adj < non-tweet",  b_tweets["adj"] < quality_breakdown(0.95, 0.005, 0.5, 500_000, 50_000, "Will Liverpool FC win?")["adj"])
+# is_structural_risk patterns (only the patterns that remain after May audit promotion)
 check("is_structural_risk on tweets from",   is_structural_risk("Will Elon Musk post 65-89 tweets from May 2 to May 4, 2026"))
+check("is_structural_risk on posts from",    is_structural_risk("Will White House post 160-179 posts from April 24 to April 27"))
 check("is_structural_risk OFF on plain win", not is_structural_risk("Will Liverpool FC win on 2026-05-03?"))
+# Series/handicap/spread were promoted to hard-block — structural penalty no longer applies
+check("Series promoted to hard-block (not structural)", not is_structural_risk("NBA Playoffs: Who Will Win Series? - Pistons vs. Magic"))
+check("Game Handicap promoted to hard-block",           not is_structural_risk("Game Handicap: ESB (-1.5) vs Onion Team"))
+check("Spread promoted to hard-block",                  not is_structural_risk("Spread: Liverpool FC (-2.5)"))
 
-# Hard block on Spread: pattern (production: WR 63.6%, total -$19 over 11 trades)
+# Hard-block patterns (May audit: -$15+ tail came from these — promoted from
+# Q-penalty to permanent block after the cap-bypass behavior on flash crashes)
 from engine.scanner import is_blocked_question
 check("Spread: hard-blocked",                is_blocked_question("Spread: Liverpool FC (-2.5)"))
 check("Spread: case-insensitive",            is_blocked_question("SPREAD: West Ham (-1.5)"))
 check("Spread block: leading whitespace ok", is_blocked_question("  Spread: Everton (-1.5)"))
+check("Map Handicap: hard-blocked",          is_blocked_question("Map Handicap: VIT (-1.5) vs Natus Vincere"))
+check("Game Handicap: hard-blocked",         is_blocked_question("Game Handicap: ESB (-1.5) vs Onion Team"))
+check("Who Will Win Series: hard-blocked",   is_blocked_question("NBA Playoffs: Who Will Win Series? - Pistons vs. Magic"))
+check("Generic Series? - X vs Y blocked",    is_blocked_question("ATP: Who Wins Series? - Sinner vs Alcaraz"))
 check("Plain sports NOT blocked",            not is_blocked_question("Will Liverpool FC win on 2026-05-03?"))
 check("Existing keyword block still works",  is_blocked_question("Will the highest temperature in Hong Kong be 25°C?"))
-check("Map Handicap NOT hard-blocked (Q-penalty only)", not is_blocked_question("Map Handicap: VIT (-1.5) vs Natus Vincere"))
 
 
 # ══════════════════════════════════════

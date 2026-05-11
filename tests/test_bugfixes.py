@@ -553,5 +553,90 @@ class TestExactScoreBinaryRisk(unittest.TestCase):
         self.assertFalse(is_binary_risk("Will the score be over 2.5?"))
 
 
+# ── May 2026 audit promotions: series/handicap/spread → hard-block ──
+# All max_loss exits in the audit window came from these patterns or BO3 esports.
+# The −10 quality penalty was insufficient (Q70-90 base scores cleared the gate).
+
+class TestSeriesHandicapHardBlocked(unittest.TestCase):
+    def test_who_will_win_series_blocked(self):
+        from engine.scanner import is_blocked_question
+        # Pistons-Magic this kind: −$15.22 on $20 stake
+        self.assertTrue(is_blocked_question(
+            "NBA Playoffs: Who Will Win Series? - Pistons vs. Magic"
+        ))
+
+    def test_generic_series_dash_blocked(self):
+        from engine.scanner import is_blocked_question
+        self.assertTrue(is_blocked_question("ATP Series? - Sinner vs Alcaraz"))
+
+    def test_map_handicap_blocked(self):
+        from engine.scanner import is_blocked_question
+        self.assertTrue(is_blocked_question("Map Handicap: VIT (-1.5) vs Natus Vincere"))
+
+    def test_game_handicap_blocked(self):
+        from engine.scanner import is_blocked_question
+        self.assertTrue(is_blocked_question("Game Handicap: ESB (-1.5) vs Onion Team"))
+
+    def test_spread_still_blocked(self):
+        from engine.scanner import is_blocked_question
+        self.assertTrue(is_blocked_question("Spread: Liverpool FC (-2.5)"))
+
+    def test_plain_match_not_blocked(self):
+        from engine.scanner import is_blocked_question
+        # Resolution-harvester's bread-and-butter must still pass.
+        self.assertFalse(is_blocked_question("Will Liverpool FC win on 2026-05-03?"))
+
+
+# ── config_live schema: min_val/max_val DOUBLE PRECISION (not REAL) ──
+# REAL (float32) caused 0.8 to read back as 0.800000011920929, which then
+# propagated through HTML5 number-input step-snapping into saved values
+# like ENTRY_PRICE_2D = 0.930000011920929.
+
+class TestConfigLiveDoublePrecision(unittest.TestCase):
+    def test_schema_uses_double_precision(self):
+        with open(os.path.join(ROOT, "utils", "db.py")) as f:
+            src = f.read()
+        # Locate the CREATE TABLE for config_live
+        start = src.index("CREATE TABLE IF NOT EXISTS config_live (")
+        end = src.index(");", start)
+        body = src[start:end]
+        self.assertIn("min_val DOUBLE PRECISION", body)
+        self.assertIn("max_val DOUBLE PRECISION", body)
+        self.assertNotIn("min_val REAL", body)
+        self.assertNotIn("max_val REAL", body)
+
+    def test_alter_migration_present(self):
+        """Existing deployments must auto-promote REAL → DOUBLE PRECISION."""
+        with open(os.path.join(ROOT, "utils", "db.py")) as f:
+            src = f.read()
+        self.assertIn("ALTER COLUMN min_val TYPE DOUBLE PRECISION", src)
+        self.assertIn("ALTER COLUMN max_val TYPE DOUBLE PRECISION", src)
+
+
+# ── rest_poll → check_position_price must not double-record as 'ws' ──
+# Before fix: rest_poll wrote source='rest_poll' (line 447) AND check_position_price
+# wrote source='ws' (line 226) for the same price/timestamp. Audit's price-path
+# view showed paired duplicate rows that obscured whether WS was actually silent.
+
+class TestRestPollSourceLabel(unittest.TestCase):
+    def test_rest_poll_passes_flag(self):
+        with open(os.path.join(ROOT, "engine", "monitor.py")) as f:
+            src = f.read()
+        # rest_poll_stale_positions must mark info dict so check_position_price
+        # knows to skip the duplicate 'ws' record.
+        start = src.index("async def rest_poll_stale_positions")
+        body = src[start:]
+        self.assertIn('"_from_rest_poll": True', body)
+
+    def test_check_position_skips_record_when_flagged(self):
+        with open(os.path.join(ROOT, "engine", "monitor.py")) as f:
+            src = f.read()
+        # The recording branch must be guarded by the flag.
+        start = src.index("async def check_position_price")
+        end = src.index("# ── Resolution", start)
+        body = src[start:end]
+        self.assertIn('info.get("_from_rest_poll")', body)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

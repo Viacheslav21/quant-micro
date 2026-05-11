@@ -217,13 +217,18 @@ async def check_position_price(ws_key: str, price: float, info: dict,
         await db.update_position_price(pos["id"], bid_price, round(pnl_dollar, 4))
         pos_last_db_write[pos["id"]] = now_ts
 
-    # Record price tick for path history (throttled: ≥0.3¢ change or ≥30s interval)
+    # Record price tick for path history (throttled: ≥0.3¢ change or ≥30s interval).
+    # Skip the record when invoked from rest_poll_stale_positions — that caller
+    # already wrote the tick with source='rest_poll'; writing another one as 'ws'
+    # would mislabel the source and produce duplicate rows in the audit's price
+    # path view (visible as paired rest_poll/ws entries with identical timestamps).
     last_rec = _price_last_recorded.get(ws_key)
     if (last_rec is None
             or abs(bid_price - last_rec[0]) >= _PRICE_RECORD_MIN_CHANGE
             or now_ts - last_rec[1] >= _PRICE_RECORD_MIN_INTERVAL):
         _price_last_recorded[ws_key] = (bid_price, now_ts)
-        await db.record_price_tick(market_id, side, bid_price, "ws")
+        if not info.get("_from_rest_poll"):
+            await db.record_price_tick(market_id, side, bid_price, "ws")
 
     close_kw = dict(ws_key=ws_key, db=db, ws=ws,
                     pos_cache=pos_cache, pos_last_db_write=pos_last_db_write,
@@ -460,7 +465,7 @@ async def rest_poll_stale_positions(open_positions: list,
 
             await check_position_price(
                 ws_key=ws_key, price=rest_price,
-                info={"best_bid": rest_price},
+                info={"best_bid": rest_price, "_from_rest_poll": True},
                 db=db, ws=ws, tg=tg, config=config,
                 http_client=http_client,
                 pos_cache=pos_cache, pos_last_db_write=pos_last_db_write,

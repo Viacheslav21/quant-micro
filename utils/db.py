@@ -224,8 +224,8 @@ class Database:
                     value TEXT NOT NULL,
                     value_type TEXT NOT NULL DEFAULT 'str',
                     description TEXT DEFAULT '',
-                    min_val REAL,
-                    max_val REAL,
+                    min_val DOUBLE PRECISION,
+                    max_val DOUBLE PRECISION,
                     section TEXT DEFAULT 'general',
                     version INTEGER DEFAULT 1,
                     updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -241,6 +241,28 @@ class Database:
                     changed_at TIMESTAMPTZ DEFAULT NOW()
                 );
                 CREATE INDEX IF NOT EXISTS idx_config_live_service ON config_live(service);
+            """)
+            # Migration: min_val/max_val were originally REAL (float32). Reading those
+            # back into Python yields artifacts like 0.800000011920929 for 0.8, which
+            # the dashboard's HTML5 number input then snaps user-typed values to
+            # (e.g. 0.93 → 0.930000011920929). Promote to DOUBLE PRECISION so the
+            # round-trip preserves clean decimals.
+            await conn.execute("""
+                ALTER TABLE config_live
+                    ALTER COLUMN min_val TYPE DOUBLE PRECISION,
+                    ALTER COLUMN max_val TYPE DOUBLE PRECISION;
+            """)
+            # One-time cleanup: existing TEXT values for float keys may carry the
+            # float32 quantization noise from previous saves through the buggy schema.
+            # Round to 6 decimals — well beyond what any human-set config needs and
+            # safely below the noise threshold (~1e-7). Bool/str/int keys untouched.
+            await conn.execute("""
+                UPDATE config_live
+                SET value = trim(trailing '.' FROM trim(trailing '0' FROM
+                    to_char(round(value::numeric, 6), 'FM999999990.000000')))
+                WHERE value_type = 'float'
+                  AND value ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                  AND value::numeric <> round(value::numeric, 6);
             """)
 
     # config_live schema for the 'micro' service (single source of truth).

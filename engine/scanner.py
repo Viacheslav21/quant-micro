@@ -282,22 +282,26 @@ BLOCKED_QUESTION_KEYWORDS = [
 # Permanent regex blocks. Distinct from BLOCKED_QUESTION_KEYWORDS (substring) and
 # from _BINARY_RISK_PATTERNS (gap-to-zero markets). Use this for patterns that
 # evolve gradually but proved net-negative on real production data.
-# Sports spreads: production data — 11 trades, WR 63.6%, total -$19.12 vs
-# non-spread sports 73 trades, WR 89%, total +$60.09 (May 2026).
+# Promoted from _STRUCTURAL_RISK_PATTERNS (was −10 quality penalty) after the
+# May audit: -10 was not enough — Q70-90 base scores still cleared the gate,
+# producing the −$15+ tail (Pistons-Magic series, Hellas Verona spread, multiple
+# handicap markets). All max_loss exits in the 7d window came from these patterns
+# or from BO3-esports flash crashes. Hard-block is the only protection that works
+# given the cap-bypass behavior on fast moves.
 _BLOCKED_QUESTION_PATTERNS = [
     re.compile(r"^\s*spread:", re.I),                 # "Spread: Liverpool FC (-2.5)"
-]
-
-# Markets that aren't binary-risk but evolve unfavorably more often than the
-# numeric features predict — multi-day sports spreads, series winners, tweet
-# count buckets. Production data: all -$15+ losses in May came from these
-# patterns at Q60-69. Penalty applied in quality_score, not a hard block.
-_STRUCTURAL_RISK_PATTERNS = [
-    re.compile(r"^\s*spread:", re.I),                 # "Spread: Liverpool FC (-2.5)" — slow grind
     re.compile(r"^\s*map handicap:", re.I),           # "Map Handicap: VIT (-1.5)"
     re.compile(r"^\s*game handicap:", re.I),          # "Game Handicap: ESB (-1.5)"
     re.compile(r"who will win series", re.I),         # "NBA Playoffs: Who Will Win Series?"
     re.compile(r"\bseries\?\s*-", re.I),              # generic "... Series? - X vs Y"
+]
+
+# Markets that aren't binary-risk but evolve unfavorably more often than the
+# numeric features predict — tweet/post count buckets resolve slowly and
+# Q60-69 entries were net-negative in production. Penalty applied in
+# quality_score, not a hard block (these resolve gradually, MAX_LOSS catches
+# them in time — unlike the hard-blocked patterns above which gap on news).
+_STRUCTURAL_RISK_PATTERNS = [
     re.compile(r"\btweets?\s+from\b", re.I),          # "Will Elon Musk post X tweets from..."
     re.compile(r"\bposts?\s+from\b", re.I),           # "Will White House post X posts from..."
 ]
